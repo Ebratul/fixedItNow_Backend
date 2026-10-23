@@ -1,0 +1,232 @@
+// FixedItNow database schema.
+//
+// Auth tables (User, Session, Account, Verification, RateLimit) follow the
+// Better Auth core schema and are managed by Better Auth at runtime. Do not
+// rename their columns. Everything else is application data.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// Platform role. ADMIN can only be granted by a trusted operator process
+/// (see `npm run admin:grant`), never through any public API.
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum OnboardingStatus {
+  DRAFT
+  SUBMITTED
+}
+
+/// Mirrors docs/SRS.md FR-WRK-05.
+enum VerificationStatus {
+  NOT_SUBMITTED
+  PENDING
+  VERIFIED
+  REJECTED
+  RESUBMISSION_REQUIRED
+}
+
+enum PricingModel {
+  FIXED
+  HOURLY
+  QUOTE
+}
+
+// ---------------------------------------------------------------------------
+// Better Auth core tables
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now()) @updatedAt
+
+  /// Trusted, DB-only. Not exposed to or settable by Better Auth clients.
+  role UserRole @default(USER)
+
+  sessions        Session[]
+  accounts        Account[]
+  customerProfile CustomerProfile?
+  workerProfile   WorkerProfile?
+  reviewedWorkers WorkerProfile[]  @relation("WorkerReviewer")
+  auditLogs       AuditLog[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  /// scrypt hash for the "credential" provider; never a plaintext password.
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+model RateLimit {
+  id          String @id
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+
+  @@map("rateLimit")
+}
+
+// ---------------------------------------------------------------------------
+// Application data
+// ---------------------------------------------------------------------------
+
+/// Customer capability. Existence of a row = the account has onboarded as a
+/// customer. Holds only data needed for the customer experience.
+model CustomerProfile {
+  id                String   @id @default(uuid(7))
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  displayName       String
+  /// One of the eight Bangladesh divisions; validated in the API.
+  preferredDivision String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("customer_profile")
+}
+
+model ServiceCategory {
+  id          String   @id @default(uuid(7))
+  slug        String   @unique
+  name        String
+  description String
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workerServices WorkerService[]
+
+  @@map("service_category")
+}
+
+/// Worker capability. Separate from the base account so one account can hold
+/// both Customer and Worker capabilities (docs/SRS.md FR-AUTH-08).
+///
+/// `onboardingStatus` (has the worker finished the form?) is deliberately
+/// separate from `verificationStatus` (has an authorised reviewer approved
+/// them?). A worker can never set the latter themselves.
+model WorkerProfile {
+  id               String           @id @default(uuid(7))
+  userId           String           @unique
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  onboardingStatus OnboardingStatus @default(DRAFT)
+  /// Furthest wizard step reached (1-5); lets the UI resume.
+  onboardingStep   Int              @default(1)
+
+  displayName     String?
+  headline        String?
+  bio             String?
+  experienceYears Int?
+  languages       String[]
+  /// Bangladesh divisions the worker serves.
+  serviceAreas    String[]
+  submittedAt     DateTime?
+
+  verificationStatus VerificationStatus @default(NOT_SUBMITTED)
+  reviewedById       String?
+  reviewedBy         User?              @relation("WorkerReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt         DateTime?
+  reviewNote         String?
+
+  services  WorkerService[]
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@index([verificationStatus])
+  @@map("worker_profile")
+}
+
+model WorkerService {
+  id              String          @id @default(uuid(7))
+  workerProfileId String
+  workerProfile   WorkerProfile   @relation(fields: [workerProfileId], references: [id], onDelete: Cascade)
+  categoryId      String
+  category        ServiceCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  pricingModel    PricingModel
+  /// Whole taka. Null when pricingModel is QUOTE.
+  basePriceBdt    Int?
+  pricingNotes    String?
+
+  @@unique([workerProfileId, categoryId])
+  @@map("worker_service")
+}
+
+/// Append-only record of privileged actions (docs/SRS.md §4.12).
+model AuditLog {
+  id         String   @id @default(uuid(7))
+  /// Null when performed by an operator script rather than a signed-in user.
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  targetType String
+  targetId   String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([targetType, targetId])
+  @@index([actorId])
+  @@map("audit_log")
+}
