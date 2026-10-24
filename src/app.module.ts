@@ -6,6 +6,7 @@ import { AdminService } from "./admin/admin.service.js";
 import { AuthGuard } from "./auth/auth.guard.js";
 import { AuthModule } from "./auth/auth.module.js";
 import { OriginGuard } from "./auth/origin.guard.js";
+import { BookingsModule } from "./bookings/bookings.module.js";
 import { CategoriesController } from "./categories/categories.controller.js";
 import { ConfigModule } from "./config/config.module.js";
 import { ENV, type Env } from "./config/env.js";
@@ -27,6 +28,7 @@ import { WorkerProfileService } from "./worker/worker-profile.service.js";
     PrismaModule,
     MailModule,
     AuthModule,
+    BookingsModule,
     ThrottlerModule.forRootAsync({
       inject: [ENV],
       useFactory: (env: Env) => ({

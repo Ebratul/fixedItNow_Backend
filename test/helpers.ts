@@ -4,9 +4,22 @@ import request from "supertest";
 import { AppModule } from "../src/app.module.js";
 import { configureApp } from "../src/app.setup.js";
 import { ENV, loadEnv } from "../src/config/env.js";
+import { Clock } from "../src/bookings/clock.js";
 import { MailService } from "../src/mail/mail.service.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
 import { testDatabaseUrl } from "./test-db.js";
+
+/** Controllable time for the booking domain (the real clock is never slept on). */
+export class FakeClock extends Clock {
+  private current: Date;
+  constructor(iso = "2026-11-01T06:00:00Z") { // Sunday 12:00 in Asia/Dhaka
+    super();
+    this.current = new Date(iso);
+  }
+  override now() { return new Date(this.current); }
+  set(date: Date | string) { this.current = new Date(date); }
+  advanceMinutes(minutes: number) { this.current = new Date(this.current.getTime() + minutes * 60_000); }
+}
 
 export const WEB_ORIGIN = "http://localhost:3000";
 export const PASSWORD = "correct-horse-battery";
@@ -26,14 +39,17 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
     ...overrides,
   });
 
+  const clock = new FakeClock();
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(ENV)
     .useValue(env)
+    .overrideProvider(Clock)
+    .useValue(clock)
     .compile();
 
   const app = moduleRef.createNestApplication<NestExpressApplication>({
     bodyParser: false,
-    logger: false,
+    logger: process.env.TEST_LOG ? ["error"] : false,
   });
   configureApp(app);
   await app.init();
@@ -48,9 +64,10 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
 
   async function resetData() {
     await prisma.$executeRawUnsafe(
-      `TRUNCATE "audit_log","favorite","worker_service","worker_profile","customer_profile","session","account","verification","rateLimit","user" CASCADE`,
+      `TRUNCATE "dispute_message","dispute","booking_event","reschedule_request","quote","booking","worker_time_off","worker_availability_rule","audit_log","favorite","worker_service","worker_profile","customer_profile","session","account","verification","rateLimit","user" CASCADE`,
     );
     mail.outbox.length = 0;
+    clock.set("2026-11-01T06:00:00Z");
   }
 
   /** Latest captured email of a kind, and the in-app path of its link. */
@@ -119,7 +136,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   }
 
   return {
-    app, prisma, mail, env, api, client, resetData, lastLink, signUpAndLogin, makeAdmin,
+    app, prisma, mail, env, clock, api, client, resetData, lastLink, signUpAndLogin, makeAdmin,
     newAdmin, createWorker,
     close: () => app.close(),
   };

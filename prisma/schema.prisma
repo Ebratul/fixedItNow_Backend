@@ -60,13 +60,14 @@ model User {
   /// Trusted, DB-only. Not exposed to or settable by Better Auth clients.
   role UserRole @default(USER)
 
-  sessions        Session[]
-  accounts        Account[]
-  customerProfile CustomerProfile?
-  workerProfile   WorkerProfile?
-  reviewedWorkers WorkerProfile[]  @relation("WorkerReviewer")
-  auditLogs       AuditLog[]
-  favorites       Favorite[]
+  sessions         Session[]
+  accounts         Account[]
+  customerProfile  CustomerProfile?
+  workerProfile    WorkerProfile?
+  reviewedWorkers  WorkerProfile[]  @relation("WorkerReviewer")
+  auditLogs        AuditLog[]
+  favorites        Favorite[]
+  customerBookings Booking[]        @relation("CustomerBookings")
 
   @@map("user")
 }
@@ -159,6 +160,7 @@ model ServiceCategory {
   updatedAt   DateTime @updatedAt
 
   workerServices WorkerService[]
+  bookings       Booking[]
 
   @@map("service_category")
 }
@@ -206,10 +208,13 @@ model WorkerProfile {
   /// transaction as service changes. Enables indexed price filter/sort.
   startingPriceBdt Int?
 
-  services  WorkerService[]
-  favorites Favorite[]
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
+  services          WorkerService[]
+  favorites         Favorite[]
+  availabilityRules WorkerAvailabilityRule[]
+  timeOff           WorkerTimeOff[]
+  bookings          Booking[]                @relation("WorkerBookings")
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
 
   @@index([verificationStatus])
   @@index([publishedAt])
@@ -265,4 +270,264 @@ model AuditLog {
   @@index([targetType, targetId])
   @@index([actorId])
   @@map("audit_log")
+}
+
+// ---------------------------------------------------------------------------
+// Bookings (Step 5)
+//
+// Money is whole BDT (integer), matching worker pricing. Instants are stored in
+// UTC; weekly availability is interpreted in Asia/Dhaka (see docs/BOOKINGS.md).
+// Constraints Prisma cannot model (exclusion constraint, partial unique
+// indexes, CHECKs) live in the migration SQL: see
+// prisma/migrations/*_step5_bookings/migration.sql
+// ---------------------------------------------------------------------------
+
+enum BookingStatus {
+  REQUESTED
+  QUOTED
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETION_PENDING
+  COMPLETED
+  CANCELLED
+  DECLINED
+  EXPIRED
+  DISPUTED
+}
+
+enum QuoteStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+  EXPIRED
+}
+
+enum RescheduleStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+  EXPIRED
+}
+
+enum ActorRole {
+  CUSTOMER
+  WORKER
+  ADMIN
+  SYSTEM
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  WAITING_FOR_INFORMATION
+  RESOLVED
+  REJECTED
+  CLOSED
+}
+
+enum DisputeCategory {
+  SERVICE_QUALITY
+  NO_SHOW
+  PRICE_DISAGREEMENT
+  CONDUCT
+  OTHER
+}
+
+/// What an admin decision does to the booking.
+enum DisputeOutcome {
+  MARK_COMPLETED
+  CANCEL_BOOKING
+  RESTORE_BOOKING
+}
+
+/// Weekly working window in Asia/Dhaka local time. weekday 0 = Sunday.
+/// Minutes are since local midnight; endMinute 1440 = end of day.
+model WorkerAvailabilityRule {
+  id              String        @id @default(uuid(7))
+  workerProfileId String
+  workerProfile   WorkerProfile @relation(fields: [workerProfileId], references: [id], onDelete: Cascade)
+  weekday         Int
+  startMinute     Int
+  endMinute       Int
+  createdAt       DateTime      @default(now())
+
+  @@index([workerProfileId, weekday])
+  @@map("worker_availability_rule")
+}
+
+/// An unavailable instant range (leave, holiday). [startAt, endAt)
+model WorkerTimeOff {
+  id              String        @id @default(uuid(7))
+  workerProfileId String
+  workerProfile   WorkerProfile @relation(fields: [workerProfileId], references: [id], onDelete: Cascade)
+  startAt         DateTime
+  endAt           DateTime
+  /// Private to the worker.
+  note            String?
+  createdAt       DateTime      @default(now())
+
+  @@index([workerProfileId, startAt])
+  @@map("worker_time_off")
+}
+
+model Booking {
+  id              String          @id @default(uuid(7))
+  customerId      String
+  customer        User            @relation("CustomerBookings", fields: [customerId], references: [id], onDelete: Restrict)
+  workerProfileId String
+  workerProfile   WorkerProfile   @relation("WorkerBookings", fields: [workerProfileId], references: [id], onDelete: Restrict)
+  categoryId      String
+  category        ServiceCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  status          BookingStatus   @default(REQUESTED)
+
+  description    String
+  serviceArea    String
+  serviceAddress String
+
+  /// Appointment window [startAt, endAt). The ONLY schedule columns: a
+  /// reschedule updates them; the previous values are kept in reschedule_request.
+  startAt         DateTime
+  endAt           DateTime
+  durationMinutes Int
+  timezone        String   @default("Asia/Dhaka")
+
+  /// Snapshot at request time so later profile edits cannot rewrite history.
+  pricingModel    PricingModel
+  unitPriceBdt    Int?
+  pricingSnapshot Json
+  currency        String       @default("BDT")
+  /// Set at confirmation from server-side data only (fixed/hourly rate or accepted quote).
+  agreedAmountBdt Int?
+  acceptedQuoteId String?      @unique
+
+  confirmedAt           DateTime?
+  startedAt             DateTime?
+  completionRequestedAt DateTime?
+  completedAt           DateTime?
+  cancelledAt           DateTime?
+  cancelledByUserId     String?
+  cancellationReason    String?
+
+  /// Client-supplied key making creation safe to retry.
+  idempotencyKey String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  quotes             Quote[]
+  events             BookingEvent[]
+  rescheduleRequests RescheduleRequest[]
+  dispute            Dispute?
+
+  @@unique([customerId, idempotencyKey])
+  @@index([customerId, createdAt])
+  @@index([workerProfileId, status, startAt])
+  @@map("booking")
+}
+
+/// Append-only history and audit trail for a booking.
+model BookingEvent {
+  id          String         @id @default(uuid(7))
+  bookingId   String
+  booking     Booking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  actorUserId String?
+  actorRole   ActorRole
+  type        String
+  fromStatus  BookingStatus?
+  toStatus    BookingStatus?
+  reason      String?
+  metadata    Json?
+  createdAt   DateTime       @default(now())
+
+  @@index([bookingId, createdAt])
+  @@map("booking_event")
+}
+
+model Quote {
+  id                       String      @id @default(uuid(7))
+  bookingId                String
+  booking                  Booking     @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  status                   QuoteStatus @default(PENDING)
+  laborBdt                 Int
+  materialsBdt             Int         @default(0)
+  otherBdt                 Int         @default(0)
+  /// Always computed by the server as labor + materials + other.
+  totalBdt                 Int
+  currency                 String      @default("BDT")
+  description              String
+  terms                    String?
+  estimatedDurationMinutes Int?
+  expiresAt                DateTime
+  createdByUserId          String
+  decidedAt                DateTime?
+  createdAt                DateTime    @default(now())
+
+  @@index([bookingId, createdAt])
+  @@map("quote")
+}
+
+model RescheduleRequest {
+  id                String           @id @default(uuid(7))
+  bookingId         String
+  booking           Booking          @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  requestedByUserId String
+  requestedByRole   ActorRole
+  /// Appointment window when the request was made.
+  previousStartAt   DateTime
+  previousEndAt     DateTime
+  newStartAt        DateTime
+  newEndAt          DateTime
+  reason            String?
+  status            RescheduleStatus @default(PENDING)
+  expiresAt         DateTime
+  decidedByUserId   String?
+  decidedAt         DateTime?
+  createdAt         DateTime         @default(now())
+
+  @@index([bookingId, createdAt])
+  @@map("reschedule_request")
+}
+
+model Dispute {
+  id                    String          @id @default(uuid(7))
+  /// One dispute per booking.
+  bookingId             String          @unique
+  booking               Booking         @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  openedByUserId        String
+  openedByRole          ActorRole
+  category              DisputeCategory
+  description           String
+  status                DisputeStatus   @default(OPEN)
+  /// Booking status before the dispute, used by RESTORE_BOOKING.
+  previousBookingStatus BookingStatus
+  assignedAdminId       String?
+  outcome               DisputeOutcome?
+  /// Visible to both parties.
+  resolution            String?
+  resolvedByUserId      String?
+  resolvedAt            DateTime?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  messages DisputeMessage[]
+
+  @@index([status, createdAt])
+  @@map("dispute")
+}
+
+/// Text-only communication on a dispute. `internal` messages are admin-only.
+/// (No file evidence yet: there is no private upload infrastructure.)
+model DisputeMessage {
+  id           String    @id @default(uuid(7))
+  disputeId    String
+  dispute      Dispute   @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  authorUserId String
+  authorRole   ActorRole
+  body         String
+  internal     Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+
+  @@index([disputeId, createdAt])
+  @@map("dispute_message")
 }
