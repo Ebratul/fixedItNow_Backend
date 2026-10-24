@@ -22,6 +22,16 @@ const reviewBody = z
     message: "A short reason is required",
   });
 
+const suspensionBody = z
+  .strictObject({
+    suspended: z.boolean(),
+    reason: z.string().trim().min(1).max(500).optional(),
+  })
+  .refine((body) => !body.suspended || Boolean(body.reason), {
+    path: ["reason"],
+    message: "A short reason is required to suspend",
+  });
+
 /** Every route here is admin-only, enforced server-side by AdminGuard. */
 @RequireAdmin()
 @Controller("admin")
@@ -41,5 +51,15 @@ export class AdminController {
     @Body(new ZodPipe(reviewBody)) body: z.infer<typeof reviewBody>,
   ) {
     return { worker: await this.admin.reviewWorker(auth, id, body.decision, body.note) };
+  }
+
+  @Post("workers/:id/suspension")
+  @HttpCode(200)
+  async suspension(
+    @CurrentAuth() auth: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodPipe(suspensionBody)) body: z.infer<typeof suspensionBody>,
+  ) {
+    return { worker: await this.admin.setSuspension(auth, id, body.suspended, body.reason) };
   }
 }

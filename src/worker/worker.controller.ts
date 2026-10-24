@@ -27,6 +27,18 @@ export class WorkerController {
     return { profile: await this.workers.submit(auth) };
   }
 
+  @Post("me/worker-profile/publish")
+  @HttpCode(200)
+  async publish(@CurrentAuth() auth: AuthContext) {
+    return { profile: await this.workers.publish(auth) };
+  }
+
+  @Post("me/worker-profile/unpublish")
+  @HttpCode(200)
+  async unpublish(@CurrentAuth() auth: AuthContext) {
+    return { profile: await this.workers.unpublish(auth) };
+  }
+
   /**
    * Foundation for worker-only features (requests, availability, earnings in
    * later steps). Requires a SUBMITTED + VERIFIED profile.

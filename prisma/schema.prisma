@@ -66,6 +66,7 @@ model User {
   workerProfile   WorkerProfile?
   reviewedWorkers WorkerProfile[]  @relation("WorkerReviewer")
   auditLogs       AuditLog[]
+  favorites       Favorite[]
 
   @@map("user")
 }
@@ -191,11 +192,30 @@ model WorkerProfile {
   reviewedAt         DateTime?
   reviewNote         String?
 
+  // --- Public listing (Step 4) -------------------------------------------
+  /// Public URL identifier, generated on first publish and then stable.
+  slug             String?   @unique
+  /// Set by the OWNER via publish/unpublish, and only while approved
+  /// (SUBMITTED + VERIFIED) and not suspended. Null = not listed.
+  publishedAt      DateTime?
+  /// Set by an ADMIN only. While set, the profile is hidden everywhere public.
+  suspendedAt      DateTime?
+  /// Internal moderation note. Never returned by any public or owner API.
+  suspensionReason String?
+  /// Denormalised MIN(base price) over priced services, maintained in the same
+  /// transaction as service changes. Enables indexed price filter/sort.
+  startingPriceBdt Int?
+
   services  WorkerService[]
+  favorites Favorite[]
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
   @@index([verificationStatus])
+  @@index([publishedAt])
+  @@index([startingPriceBdt])
+  @@index([experienceYears])
+  @@index([serviceAreas], type: Gin)
   @@map("worker_profile")
 }
 
@@ -211,7 +231,23 @@ model WorkerService {
   pricingNotes    String?
 
   @@unique([workerProfileId, categoryId])
+  @@index([categoryId])
   @@map("worker_service")
+}
+
+/// A user's saved worker. One row per (user, worker); the unique constraint
+/// makes adding idempotent and prevents duplicates under concurrent requests.
+model Favorite {
+  id              String        @id @default(uuid(7))
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workerProfileId String
+  workerProfile   WorkerProfile @relation(fields: [workerProfileId], references: [id], onDelete: Cascade)
+  createdAt       DateTime      @default(now())
+
+  @@unique([userId, workerProfileId])
+  @@index([userId, createdAt])
+  @@map("favorite")
 }
 
 /// Append-only record of privileged actions (docs/SRS.md §4.12).

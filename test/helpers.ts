@@ -48,7 +48,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
 
   async function resetData() {
     await prisma.$executeRawUnsafe(
-      `TRUNCATE "audit_log","worker_service","worker_profile","customer_profile","session","account","verification","rateLimit","user" CASCADE`,
+      `TRUNCATE "audit_log","favorite","worker_service","worker_profile","customer_profile","session","account","verification","rateLimit","user" CASCADE`,
     );
     mail.outbox.length = 0;
   }
@@ -78,8 +78,49 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
     await prisma.user.update({ where: { id: userId }, data: { role: "ADMIN" } });
   }
 
+  async function newAdmin() {
+    const admin = await signUpAndLogin(uniqueEmail("admin"));
+    await makeAdmin(admin.userId);
+    return admin;
+  }
+
+  /**
+   * Creates a worker through the real API. `stage` controls how far the
+   * profile gets: draft -> submitted (PENDING) -> approved (VERIFIED) -> published.
+   */
+  async function createWorker(
+    opts: Partial<typeof validWorkerProfile> & {
+      stage?: "draft" | "submitted" | "approved" | "published";
+      admin?: Awaited<ReturnType<typeof signUpAndLogin>>;
+    } = {},
+  ) {
+    const { stage = "published", admin: givenAdmin, ...profileOverrides } = opts;
+    const worker = await signUpAndLogin(uniqueEmail("w"));
+    const body = { ...validWorkerProfile, ...profileOverrides };
+    const saved = await worker.agent.put(`${api}/me/worker-profile`).send(body);
+    if (saved.status !== 200) throw new Error(`save failed ${saved.status} ${JSON.stringify(saved.body)}`);
+    const profileId = saved.body.profile.id as string;
+    let slug: string | undefined;
+    if (stage !== "draft") {
+      const sub = await worker.agent.post(`${api}/me/worker-profile/submit`).send({});
+      if (sub.status !== 200) throw new Error(`submit failed ${sub.status}`);
+    }
+    if (stage === "approved" || stage === "published") {
+      const admin = givenAdmin ?? (await newAdmin());
+      const rev = await admin.agent.post(`${api}/admin/workers/${profileId}/verification`).send({ decision: "VERIFIED" });
+      if (rev.status !== 200) throw new Error(`review failed ${rev.status}`);
+    }
+    if (stage === "published") {
+      const pub = await worker.agent.post(`${api}/me/worker-profile/publish`).send({});
+      if (pub.status !== 200) throw new Error(`publish failed ${pub.status}`);
+      slug = pub.body.profile.slug as string;
+    }
+    return { ...worker, profileId, slug };
+  }
+
   return {
     app, prisma, mail, env, api, client, resetData, lastLink, signUpAndLogin, makeAdmin,
+    newAdmin, createWorker,
     close: () => app.close(),
   };
 }

@@ -25,6 +25,8 @@ export class AdminService {
         displayName: true,
         submittedAt: true,
         verificationStatus: true,
+        publishedAt: true,
+        suspendedAt: true,
         user: { select: { email: true } },
         services: { select: { category: { select: { name: true } } } },
       },
@@ -37,6 +39,8 @@ export class AdminService {
         email: row.user.email,
         submittedAt: row.submittedAt,
         verificationStatus: row.verificationStatus,
+        published: row.publishedAt !== null,
+        suspended: row.suspendedAt !== null,
         categories: row.services.map((s) => s.category.name),
       })),
     };
@@ -86,6 +90,47 @@ export class AdminService {
         },
       });
       return updated;
+    });
+  }
+
+  /**
+   * Suspend or restore a profile. While suspended it is hidden from every
+   * public read (see ELIGIBLE_WORKER) and cannot be published. The reason is an
+   * internal moderation note and is never returned by any public or owner API.
+   */
+  async setSuspension(
+    admin: AuthContext,
+    workerProfileId: string,
+    suspended: boolean,
+    reason: string | undefined,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const profile = await tx.workerProfile.findUnique({
+        where: { id: workerProfileId },
+        select: { id: true, userId: true },
+      });
+      if (!profile) throw new NotFoundException("Worker profile not found");
+      if (!canReviewWorker(admin, profile.userId)) {
+        throw new ForbiddenException("You cannot moderate your own profile");
+      }
+      const updated = await tx.workerProfile.update({
+        where: { id: profile.id },
+        data: {
+          suspendedAt: suspended ? new Date() : null,
+          suspensionReason: suspended ? (reason ?? null) : null,
+        },
+        select: { id: true, suspendedAt: true },
+      });
+      await tx.auditLog.create({
+        data: {
+          actorId: admin.userId,
+          action: suspended ? "worker.suspend" : "worker.unsuspend",
+          targetType: "WorkerProfile",
+          targetId: profile.id,
+          metadata: { hasReason: Boolean(reason) },
+        },
+      });
+      return { id: updated.id, suspended: updated.suspendedAt !== null };
     });
   }
 }

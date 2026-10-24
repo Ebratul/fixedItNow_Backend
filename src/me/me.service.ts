@@ -16,6 +16,11 @@ export const workerProfileSelect = {
   submittedAt: true,
   verificationStatus: true,
   reviewNote: true,
+  // Public-listing state. suspensionReason is internal and deliberately absent.
+  slug: true,
+  publishedAt: true,
+  suspendedAt: true,
+  startingPriceBdt: true,
   services: {
     orderBy: { category: { sortOrder: "asc" } },
     select: {

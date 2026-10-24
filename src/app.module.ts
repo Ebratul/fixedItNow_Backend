@@ -13,7 +13,11 @@ import { HealthController } from "./health/health.controller.js";
 import { MailModule } from "./mail/mail.module.js";
 import { MeController } from "./me/me.controller.js";
 import { MeService } from "./me/me.service.js";
+import { FavoritesController } from "./favorites/favorites.controller.js";
+import { FavoritesService } from "./favorites/favorites.service.js";
 import { PrismaModule } from "./prisma/prisma.module.js";
+import { WorkersController } from "./workers/workers.controller.js";
+import { WorkersService } from "./workers/workers.service.js";
 import { WorkerController } from "./worker/worker.controller.js";
 import { WorkerProfileService } from "./worker/worker-profile.service.js";
 
@@ -38,11 +42,15 @@ import { WorkerProfileService } from "./worker/worker-profile.service.js";
     CategoriesController,
     MeController,
     WorkerController,
+    WorkersController,
+    FavoritesController,
     AdminController,
   ],
   providers: [
     MeService,
     WorkerProfileService,
+    WorkersService,
+    FavoritesService,
     AdminService,
     // Execution order: origin (CSRF) -> throttle -> authenticate. Authorization
     // guards (admin / approved worker) run after these, per route.

@@ -1,11 +1,14 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
 } from "@nestjs/common";
 import type { AuthContext } from "../auth/auth.types.js";
 import { workerProfileSelect } from "../me/me.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { canPublish } from "../workers/eligibility.js";
+import { newSlug } from "../workers/slug.js";
 import {
   workerSubmitSchema,
   type WorkerDraftInput,
@@ -47,6 +50,15 @@ export class WorkerProfileService {
             basePriceBdt: service.basePriceBdt ?? null,
             pricingNotes: service.pricingNotes ?? null,
           })),
+        });
+        // Keep the denormalised starting price in step with the services, in
+        // the same transaction (powers the indexed price filter/sort).
+        const prices = services
+          .map((s) => s.basePriceBdt)
+          .filter((p): p is number => typeof p === "number");
+        await tx.workerProfile.update({
+          where: { id: profile.id },
+          data: { startingPriceBdt: prices.length ? Math.min(...prices) : null },
         });
       }
 
@@ -107,6 +119,74 @@ export class WorkerProfileService {
         verificationStatus: "PENDING",
         reviewNote: null,
       },
+      select: workerProfileSelect,
+    });
+  }
+
+  /**
+   * Owner opts in to public listing. Allowed only for an approved
+   * (SUBMITTED + VERIFIED), non-suspended profile; the conditions are part of
+   * the UPDATE itself so a concurrent suspension cannot be raced past.
+   * Idempotent: republishing keeps the original publishedAt and slug.
+   */
+  async publish(auth: AuthContext) {
+    const profile = await this.prisma.workerProfile.findUnique({
+      where: { userId: auth.userId },
+      select: {
+        id: true,
+        displayName: true,
+        slug: true,
+        publishedAt: true,
+        onboardingStatus: true,
+        verificationStatus: true,
+        suspendedAt: true,
+      },
+    });
+    if (!profile) throw new BadRequestException("Start your worker profile first");
+    if (profile.suspendedAt) throw new ForbiddenException("This profile is suspended");
+    if (!canPublish(profile)) {
+      throw new ConflictException("Only approved profiles can be published");
+    }
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const result = await this.prisma.workerProfile.updateMany({
+          where: {
+            id: profile.id,
+            onboardingStatus: "SUBMITTED",
+            verificationStatus: "VERIFIED",
+            suspendedAt: null,
+          },
+          data: {
+            publishedAt: profile.publishedAt ?? new Date(),
+            slug: profile.slug ?? newSlug(profile.displayName ?? "worker"),
+          },
+        });
+        if (result.count === 0) {
+          throw new ConflictException("Only approved profiles can be published");
+        }
+        return this.prisma.workerProfile.findUniqueOrThrow({
+          where: { id: profile.id },
+          select: workerProfileSelect,
+        });
+      } catch (error) {
+        // Slug collision (unique index): draw a new suffix and retry.
+        if ((error as { code?: string }).code !== "P2002" || profile.slug) throw error;
+      }
+    }
+    throw new ConflictException("Could not allocate a public address, please try again");
+  }
+
+  /** Owner removes the profile from public listing. Idempotent; keeps the slug. */
+  async unpublish(auth: AuthContext) {
+    const profile = await this.prisma.workerProfile.findUnique({
+      where: { userId: auth.userId },
+      select: { id: true },
+    });
+    if (!profile) throw new BadRequestException("Start your worker profile first");
+    return this.prisma.workerProfile.update({
+      where: { id: profile.id },
+      data: { publishedAt: null },
       select: workerProfileSelect,
     });
   }
