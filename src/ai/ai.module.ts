@@ -9,5 +9,6 @@ import { AiService } from "./ai.service.js";
 @Module({
   controllers: [AiController, AiInternalController],
   providers: [AiService, AiClient, AiRateLimiter, WorkersService],
+  exports: [AiClient],
 })
 export class AiModule {}

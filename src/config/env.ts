@@ -14,6 +14,13 @@ const schema = z
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
     PORT: z.coerce.number().int().min(1).max(65535).default(4000),
     DATABASE_URL: z.string().min(1),
+    // Connection pool and runaway-query guards (pg). Defaults suit a small instance; size the
+    // pool so (instances x DATABASE_POOL_MAX) stays below the database's connection limit.
+    DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+    DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).default(5_000),
+    DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(15_000),
+    // One JSON access-log line per request (no query string, no bodies). Off in tests by default.
+    HTTP_LOG: boolean.optional(),
 
     // Auth. BETTER_AUTH_URL is the PUBLIC origin users see (the web app),
     // because the web app proxies /api/v1/* to this service. OAuth redirect

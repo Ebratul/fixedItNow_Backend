@@ -14,6 +14,7 @@ import { CategoriesController } from "./categories/categories.controller.js";
 import { ConfigModule } from "./config/config.module.js";
 import { ENV, type Env } from "./config/env.js";
 import { HealthController } from "./health/health.controller.js";
+import { OpsController } from "./ops/ops.controller.js";
 import { MailModule } from "./mail/mail.module.js";
 import { MeController } from "./me/me.controller.js";
 import { MeService } from "./me/me.service.js";
@@ -49,6 +50,7 @@ import { WorkerProfileService } from "./worker/worker-profile.service.js";
   ],
   controllers: [
     HealthController,
+    OpsController,
     CategoriesController,
     MeController,
     WorkerController,

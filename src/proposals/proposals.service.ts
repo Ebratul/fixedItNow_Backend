@@ -7,8 +7,8 @@ import type { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { PROPOSALS_PER_DAY, VOTING_OPEN, type ProposalStatusName } from "./proposals.schemas.js";
 
-const select = (viewerId: string) =>
-  ({
+/** Vote counts and the viewer's vote are added per page by `decorate()` (Prisma's `_count` would aggregate every vote on every page). */
+const select = {
     id: true,
     title: true,
     description: true,
@@ -18,11 +18,10 @@ const select = (viewerId: string) =>
     authorId: true,
     createdAt: true,
     author: { select: authorSelect },
-    _count: { select: { votes: true } },
-    votes: { where: { userId: viewerId }, select: { id: true }, take: 1 },
-  }) satisfies Prisma.FeatureProposalSelect;
+} satisfies Prisma.FeatureProposalSelect;
 
-type Row = Prisma.FeatureProposalGetPayload<{ select: ReturnType<typeof select> }>;
+type Base = Prisma.FeatureProposalGetPayload<{ select: typeof select }>;
+type Row = Base & { _count: { votes: number }; votes: { id: string }[] };
 
 const present = (r: Row, viewerId: string) => ({
   id: r.id,
@@ -44,6 +43,18 @@ const present = (r: Row, viewerId: string) => ({
 export class ProposalsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async decorate(rows: Base[], viewerId: string): Promise<Row[]> {
+    const ids = rows.map((r) => r.id);
+    if (ids.length === 0) return [];
+    const [counts, mine] = await Promise.all([
+      this.prisma.featureVote.groupBy({ by: ["proposalId"], where: { proposalId: { in: ids } }, _count: { _all: true } }),
+      this.prisma.featureVote.findMany({ where: { proposalId: { in: ids }, userId: viewerId }, select: { id: true, proposalId: true } }),
+    ]);
+    const countBy = new Map(counts.map((c) => [c.proposalId, c._count._all]));
+    const mineBy = new Map(mine.map((m) => [m.proposalId, m.id]));
+    return rows.map((r) => ({ ...r, _count: { votes: countBy.get(r.id) ?? 0 }, votes: mineBy.has(r.id) ? [{ id: mineBy.get(r.id)! }] : [] }));
+  }
+
   async list(auth: AuthContext, q: { sort: "top" | "new"; status?: ProposalStatusName; page: number; pageSize: number }) {
     const where: Prisma.FeatureProposalWhereInput = { visibility: "VISIBLE", ...(q.status && { status: q.status }) };
     const orderBy: Prisma.FeatureProposalOrderByWithRelationInput[] =
@@ -52,10 +63,11 @@ export class ProposalsService {
         : [{ createdAt: "desc" }, { id: "asc" }];
     const [total, rows] = await this.prisma.$transaction([
       this.prisma.featureProposal.count({ where }),
-      this.prisma.featureProposal.findMany({ where, orderBy, skip: (q.page - 1) * q.pageSize, take: q.pageSize, select: select(auth.userId) }),
+      this.prisma.featureProposal.findMany({ where, orderBy, skip: (q.page - 1) * q.pageSize, take: q.pageSize, select }),
     ]);
+    const decorated = await this.decorate(rows, auth.userId);
     return {
-      proposals: rows.map((r) => present(r, auth.userId)),
+      proposals: decorated.map((r) => present(r, auth.userId)),
       page: q.page,
       pageSize: q.pageSize,
       total,
@@ -64,9 +76,9 @@ export class ProposalsService {
   }
 
   private async find(auth: AuthContext, id: string) {
-    const row = await this.prisma.featureProposal.findFirst({ where: { id, visibility: "VISIBLE" }, select: select(auth.userId) });
+    const row = await this.prisma.featureProposal.findFirst({ where: { id, visibility: "VISIBLE" }, select });
     if (!row) throw new NotFoundException("Proposal not found");
-    return row;
+    return (await this.decorate([row], auth.userId))[0]!;
   }
 
   async get(auth: AuthContext, id: string) {

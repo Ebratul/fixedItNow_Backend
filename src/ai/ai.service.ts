@@ -1,5 +1,6 @@
 import { HttpException, HttpStatus, Inject, Injectable, Logger } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
+import { currentRequestId } from "../common/request-context.js";
 import { ENV, type Env } from "../config/env.js";
 import { WorkersService } from "../workers/workers.service.js";
 import { AiClient, AiClientError } from "./ai-client.js";
@@ -51,7 +52,8 @@ export class AiService {
       );
     }
 
-    const correlationId = randomUUID().replaceAll("-", "");
+    // The same id the client received in X-Request-Id, so one request can be followed across services.
+    const correlationId = currentRequestId() ?? randomUUID().replaceAll("-", "");
     const started = Date.now();
     const subject = createHash("sha256").update(userId).digest("hex");
     let raw: unknown;

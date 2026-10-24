@@ -1,0 +1,73 @@
+# Disposable LOCAL staging stack: the same container images production would use,
+# wired together on a private network with a throwaway Postgres. It exists to prove
+# that the images build, migrate, start, pass their health checks and talk to each
+# other. It is NOT a production deployment (see docs/DEPLOYMENT.md and docs/RUNBOOK.md).
+#
+#   cd backend && cp staging.env.example staging.env   # fill in local-only values
+#   docker compose -f docker-compose.staging.yml --env-file staging.env up --build -d
+#   open http://localhost:3300     (web)   |   API: http://localhost:4300/api/v1/health/ready
+#   docker compose -f docker-compose.staging.yml --env-file staging.env down -v    # deletes the database
+name: fixeditnow-staging
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: fixeditnow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in staging.env}
+      POSTGRES_DB: fixeditnow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fixeditnow -d fixeditnow"]
+      interval: 3s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  migrate:   # one-shot release job: apply migrations, then seed reference data (service categories only)
+    build: { context: ., target: migrate }
+    environment:
+      DATABASE_URL: postgresql://fixeditnow:${POSTGRES_PASSWORD}@db:5432/fixeditnow
+    command: ["sh", "-c", "npx prisma migrate deploy && npx prisma db seed"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  api:
+    build: { context: ., target: runtime }
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DATABASE_URL: postgresql://fixeditnow:${POSTGRES_PASSWORD}@db:5432/fixeditnow
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in staging.env}
+      BETTER_AUTH_URL: https://staging.example.test        # production requires https; this stack has no TLS, so the browser flows that need secure cookies are NOT exercised here
+      FRONTEND_ORIGIN: https://staging.example.test
+      MAIL_TRANSPORT: smtp
+      SMTP_HOST: mailsink.invalid                          # no mail is sent from this stack
+      TRUSTED_PROXIES: 127.0.0.1,172.16.0.0/12,10.0.0.0/8
+      AI_SERVICE_URL: http://ai:8000
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?set AI_SERVICE_TOKEN in staging.env}
+      APP_API_SERVICE_TOKEN: ${APP_API_SERVICE_TOKEN:?set APP_API_SERVICE_TOKEN in staging.env}
+    ports: ["127.0.0.1:4300:4000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  ai:
+    build: { context: ../rag_agent }
+    environment:
+      APP_ENV: production
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN}
+      APP_API_SERVICE_TOKEN: ${APP_API_SERVICE_TOKEN}
+      APP_API_BASE_URL: http://api:4000/api/v1
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+    # no published port: only the API reaches the AI service
+    depends_on:
+      api: { condition: service_healthy }
+
+  web:
+    build:
+      context: ../frontend
+      args: { BACKEND_URL: "http://api:4000" }
+    environment:
+      BACKEND_URL: http://api:4000
+    ports: ["127.0.0.1:3300:3000"]
+    depends_on:
+      api: { condition: service_healthy }

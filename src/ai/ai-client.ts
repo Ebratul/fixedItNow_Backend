@@ -18,6 +18,20 @@ export class AiClientError extends Error {
 export class AiClient {
   constructor(@Inject(ENV) private readonly env: Env) {}
 
+  /** Liveness of the AI service for operators (never for user requests). Null = unreachable or not configured. */
+  async health(): Promise<{ status: string; llm: string } | null> {
+    const ai = this.env.ai;
+    if (!ai) return null;
+    try {
+      const response = await fetch(`${ai.serviceUrl}/health`, { redirect: "error", signal: AbortSignal.timeout(2_000) });
+      if (!response.ok) return null;
+      const json = (await response.json()) as { status?: unknown; llm?: unknown };
+      return typeof json.status === "string" ? { status: json.status, llm: typeof json.llm === "string" ? json.llm : "unknown" } : null;
+    } catch {
+      return null;
+    }
+  }
+
   async chat(body: unknown, ctx: AiCallContext): Promise<unknown> {
     const ai = this.env.ai;
     if (!ai) throw new AiClientError("unreachable");

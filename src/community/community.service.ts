@@ -10,19 +10,22 @@ import { PrismaService } from "../prisma/prisma.service.js";
 export const POSTS_PER_HOUR = 10;
 export const COMMENTS_PER_HOUR = 30;
 
-const postSelect = (viewerId: string) =>
-  ({
-    id: true,
-    title: true,
-    body: true,
-    status: true,
-    authorId: true,
-    createdAt: true,
-    editedAt: true,
-    author: { select: authorSelect },
-    _count: { select: { reactions: true, comments: { where: { status: "VISIBLE" } } } },
-    reactions: { where: { userId: viewerId }, select: { id: true }, take: 1 },
-  }) as const;
+/**
+ * Counts are NOT selected with Prisma's `_count`: it compiles to a join against
+ * a GROUP BY over the whole reactions / comments tables, so every page costs a
+ * full scan (measured ~100 ms at 100k reactions + 150k comments, independent of
+ * page size). `decorate()` counts only the ids on the page instead.
+ */
+const postSelect = {
+  id: true,
+  title: true,
+  body: true,
+  status: true,
+  authorId: true,
+  createdAt: true,
+  editedAt: true,
+  author: { select: authorSelect },
+} as const;
 
 type PostRow = Awaited<ReturnType<PrismaService["communityPost"]["findFirstOrThrow"]>> & {
   author: { name: string; customerProfile: { displayName: string } | null };
@@ -33,6 +36,25 @@ type PostRow = Awaited<ReturnType<PrismaService["communityPost"]["findFirstOrThr
 @Injectable()
 export class CommunityService {
   constructor(private readonly prisma: PrismaService) {}
+
+  /** Adds like/comment counts and the viewer's own like for the posts on one page (three queries bounded by the page's ids). */
+  private async decorate<T extends { id: string }>(rows: T[], viewerId: string): Promise<(T & Pick<PostRow, "_count" | "reactions">)[]> {
+    const ids = rows.map((r) => r.id);
+    if (ids.length === 0) return [];
+    const [likes, comments, mine] = await Promise.all([
+      this.prisma.postReaction.groupBy({ by: ["postId"], where: { postId: { in: ids } }, _count: { _all: true } }),
+      this.prisma.postComment.groupBy({ by: ["postId"], where: { postId: { in: ids }, status: "VISIBLE" }, _count: { _all: true } }),
+      this.prisma.postReaction.findMany({ where: { postId: { in: ids }, userId: viewerId }, select: { id: true, postId: true } }),
+    ]);
+    const likeBy = new Map(likes.map((l) => [l.postId, l._count._all]));
+    const commentBy = new Map(comments.map((c) => [c.postId, c._count._all]));
+    const mineBy = new Map(mine.map((m) => [m.postId, m.id]));
+    return rows.map((r) => ({
+      ...r,
+      _count: { reactions: likeBy.get(r.id) ?? 0, comments: commentBy.get(r.id) ?? 0 },
+      reactions: mineBy.has(r.id) ? [{ id: mineBy.get(r.id)! }] : [],
+    }));
+  }
 
   /** A post as the viewer may see it. `status` is HIDDEN only for the author's own removed post. */
   private presentPost(row: PostRow, viewerId: string, full: boolean) {
@@ -68,11 +90,12 @@ export class CommunityService {
         orderBy: [{ createdAt: "desc" }, { id: "asc" }],
         skip: (page - 1) * pageSize,
         take: pageSize,
-        select: postSelect(auth.userId),
+        select: postSelect,
       }),
     ]);
+    const decorated = await this.decorate(rows, auth.userId);
     return {
-      posts: (rows as unknown as PostRow[]).map((r) => this.presentPost(r, auth.userId, false)),
+      posts: (decorated as unknown as PostRow[]).map((r) => this.presentPost(r, auth.userId, false)),
       page,
       pageSize,
       total,
@@ -81,12 +104,12 @@ export class CommunityService {
   }
 
   private async findPost(auth: AuthContext, id: string): Promise<PostRow> {
-    const row = (await this.prisma.communityPost.findFirst({
+    const row = await this.prisma.communityPost.findFirst({
       where: { id, OR: [{ status: "VISIBLE" }, { status: "HIDDEN", authorId: auth.userId }] },
-      select: postSelect(auth.userId),
-    })) as unknown as PostRow | null;
+      select: postSelect,
+    });
     if (!row) throw new NotFoundException("Post not found");
-    return row;
+    return (await this.decorate([row], auth.userId))[0] as unknown as PostRow;
   }
 
   async getPost(auth: AuthContext, id: string) {

@@ -131,3 +131,29 @@ describe("AI assistant configuration", () => {
     }
   });
 });
+
+describe("operational settings", () => {
+  const base = {
+    DATABASE_URL: "postgresql://u:p@localhost:5432/db",
+    BETTER_AUTH_SECRET: "x".repeat(40),
+    BETTER_AUTH_URL: "http://localhost:3000",
+    FRONTEND_ORIGIN: "http://localhost:3000",
+  };
+
+  it("has safe database defaults: bounded pool, connect timeout and statement timeout", () => {
+    const env = loadEnv(base);
+    expect(env).toMatchObject({ DATABASE_POOL_MAX: 10, DATABASE_CONNECT_TIMEOUT_MS: 5000, DATABASE_STATEMENT_TIMEOUT_MS: 15000 });
+  });
+
+  it("rejects values that would disable the protections", () => {
+    expect(() => loadEnv({ ...base, DATABASE_POOL_MAX: "0" })).toThrow(/DATABASE_POOL_MAX/);
+    expect(() => loadEnv({ ...base, DATABASE_POOL_MAX: "1000" })).toThrow(/DATABASE_POOL_MAX/);
+    expect(() => loadEnv({ ...base, DATABASE_CONNECT_TIMEOUT_MS: "0" })).toThrow(/DATABASE_CONNECT_TIMEOUT_MS/);
+    expect(() => loadEnv({ ...base, DATABASE_STATEMENT_TIMEOUT_MS: "10" })).toThrow(/DATABASE_STATEMENT_TIMEOUT_MS/);
+  });
+
+  it("access logging is explicit true/false only", () => {
+    expect(loadEnv({ ...base, HTTP_LOG: "true" }).HTTP_LOG).toBe(true);
+    expect(() => loadEnv({ ...base, HTTP_LOG: "yes" })).toThrow(/HTTP_LOG/);
+  });
+});
