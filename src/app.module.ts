@@ -3,6 +3,9 @@ import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { AdminController } from "./admin/admin.controller.js";
 import { AdminService } from "./admin/admin.service.js";
+import { AiModule } from "./ai/ai.module.js";
+import { CommunityModule } from "./community/community.module.js";
+import { ReviewsModule } from "./reviews/reviews.module.js";
 import { AuthGuard } from "./auth/auth.guard.js";
 import { AuthModule } from "./auth/auth.module.js";
 import { OriginGuard } from "./auth/origin.guard.js";
@@ -31,6 +34,9 @@ import { WorkerProfileService } from "./worker/worker-profile.service.js";
     AuthModule,
     BookingsModule,
     PaymentsModule,
+    AiModule,
+    ReviewsModule,
+    CommunityModule,
     ThrottlerModule.forRootAsync({
       inject: [ENV],
       useFactory: (env: Env) => ({

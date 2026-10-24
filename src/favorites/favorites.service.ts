@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import type { AuthContext } from "../auth/auth.types.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { ratingSummaries } from "../reviews/ratings.js";
 import { ELIGIBLE_WORKER } from "../workers/eligibility.js";
 import { cardSelect, toCard } from "../workers/workers.service.js";
 
@@ -61,8 +62,9 @@ export class FavoritesService {
         select: { workerProfile: { select: cardSelect } },
       }),
     ]);
+    const ratings = await ratingSummaries(this.prisma, rows.map((r) => r.workerProfile.id));
     return {
-      workers: rows.map((r) => toCard(r.workerProfile)),
+      workers: rows.map((r) => toCard(r.workerProfile, ratings.get(r.workerProfile.id))),
       page,
       pageSize,
       total,

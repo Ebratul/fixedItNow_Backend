@@ -70,6 +70,21 @@ model User {
   customerBookings Booking[]        @relation("CustomerBookings")
   customerPayments Payment[]        @relation("CustomerPayments")
 
+  // Step 9: reviews, community, proposals, moderation
+  reviews             Review[]          @relation("ReviewAuthor")
+  moderatedReviews    Review[]          @relation("ReviewModerator")
+  posts               CommunityPost[]   @relation("PostAuthor")
+  moderatedPosts      CommunityPost[]   @relation("PostModerator")
+  comments            PostComment[]     @relation("CommentAuthor")
+  moderatedComments   PostComment[]     @relation("CommentModerator")
+  reactions           PostReaction[]
+  proposals           FeatureProposal[] @relation("ProposalAuthor")
+  moderatedProposals  FeatureProposal[] @relation("ProposalModerator")
+  respondedProposals  FeatureProposal[] @relation("ProposalResponder")
+  featureVotes        FeatureVote[]
+  reportsFiled        ContentReport[]   @relation("ReportReporter")
+  reportsReviewed     ContentReport[]   @relation("ReportReviewer")
+
   @@map("user")
 }
 
@@ -214,6 +229,7 @@ model WorkerProfile {
   availabilityRules WorkerAvailabilityRule[]
   timeOff           WorkerTimeOff[]
   bookings          Booking[]                @relation("WorkerBookings")
+  reviews           Review[]
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
 
@@ -421,6 +437,7 @@ model Booking {
   rescheduleRequests RescheduleRequest[]
   dispute            Dispute?
   payments           Payment[]
+  review             Review?
 
   @@unique([customerId, idempotencyKey])
   @@index([customerId, createdAt])
@@ -694,4 +711,241 @@ model Refund {
   @@index([paymentId, createdAt])
   @@index([status, createdAt])
   @@map("refund")
+}
+
+// ---------------------------------------------------------------------------
+// Step 9: reviews, community, feature proposals, reports (docs/AI.md is Step 8)
+// ---------------------------------------------------------------------------
+
+/// Visibility of user-generated content. HIDDEN is set only by an administrator
+/// (with a reason) and is reversible; DELETED is set only by the author and is final.
+enum ContentStatus {
+  VISIBLE
+  HIDDEN
+  DELETED
+}
+
+enum ReactionType {
+  LIKE
+}
+
+enum ProposalStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  ACCEPTED
+  DECLINED
+  PLANNED
+  COMPLETED
+}
+
+enum ReportTargetType {
+  POST
+  COMMENT
+  REVIEW
+  PROPOSAL
+}
+
+enum ReportReason {
+  SPAM
+  ABUSE
+  FRAUD
+  INAPPROPRIATE
+  PRIVACY
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWING
+  ACTIONED
+  DISMISSED
+}
+
+/// One review per booking (unique bookingId). It counts toward a worker's rating
+/// only while status = VISIBLE AND the booking is COMPLETED (see reviews/ratings.ts).
+/// CHECK constraints (rating range, lengths, moderation coherence) live in the migration SQL.
+model Review {
+  id              String        @id @default(uuid(7))
+  bookingId       String        @unique
+  booking         Booking       @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  customerId      String
+  customer        User          @relation("ReviewAuthor", fields: [customerId], references: [id], onDelete: Restrict)
+  workerProfileId String
+  workerProfile   WorkerProfile @relation(fields: [workerProfileId], references: [id], onDelete: Restrict)
+  rating          Int
+  comment         String?
+  status          ContentStatus @default(VISIBLE)
+  /// Admin moderation (HIDDEN). The reason is internal and never public.
+  moderatedById   String?
+  moderatedBy     User?         @relation("ReviewModerator", fields: [moderatedById], references: [id], onDelete: SetNull)
+  moderatedAt     DateTime?
+  moderationReason String?
+  editedAt        DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  revisions ReviewRevision[]
+  reports   ContentReport[]
+
+  @@index([workerProfileId, status, createdAt])
+  @@index([customerId, createdAt])
+  @@map("review")
+}
+
+/// What a review said before each edit (append-only by convention; admin-visible only).
+model ReviewRevision {
+  id        String   @id @default(uuid(7))
+  reviewId  String
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Restrict)
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@index([reviewId, createdAt])
+  @@map("review_revision")
+}
+
+model CommunityPost {
+  id               String        @id @default(uuid(7))
+  authorId         String
+  author           User          @relation("PostAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  title            String
+  body             String
+  status           ContentStatus @default(VISIBLE)
+  moderatedById    String?
+  moderatedBy      User?         @relation("PostModerator", fields: [moderatedById], references: [id], onDelete: SetNull)
+  moderatedAt      DateTime?
+  moderationReason String?
+  editedAt         DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  comments  PostComment[]
+  reactions PostReaction[]
+  reports   ContentReport[]
+
+  @@index([status, createdAt(sort: Desc), id])
+  @@index([authorId, createdAt])
+  @@map("community_post")
+}
+
+/// Flat (one level) on purpose: nested threads are not in the SRS.
+model PostComment {
+  id               String        @id @default(uuid(7))
+  postId           String
+  post             CommunityPost @relation(fields: [postId], references: [id], onDelete: Restrict)
+  authorId         String
+  author           User          @relation("CommentAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  body             String
+  status           ContentStatus @default(VISIBLE)
+  moderatedById    String?
+  moderatedBy      User?         @relation("CommentModerator", fields: [moderatedById], references: [id], onDelete: SetNull)
+  moderatedAt      DateTime?
+  moderationReason String?
+  editedAt         DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  reports ContentReport[]
+
+  @@index([postId, status, createdAt, id])
+  @@index([authorId, createdAt])
+  @@map("post_comment")
+}
+
+model PostReaction {
+  id        String        @id @default(uuid(7))
+  postId    String
+  post      CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      ReactionType  @default(LIKE)
+  createdAt DateTime      @default(now())
+
+  /// Duplicate reactions are impossible, even under concurrent requests.
+  @@unique([postId, userId, type])
+  @@index([userId])
+  @@map("post_reaction")
+}
+
+model FeatureProposal {
+  id               String         @id @default(uuid(7))
+  authorId         String
+  author           User           @relation("ProposalAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  title            String
+  description      String
+  /// Decision lifecycle (admin only): see docs/COMMUNITY.md.
+  status           ProposalStatus @default(SUBMITTED)
+  /// Public admin response (required when declining).
+  responseNote     String?
+  respondedById    String?
+  respondedBy      User?          @relation("ProposalResponder", fields: [respondedById], references: [id], onDelete: SetNull)
+  respondedAt      DateTime?
+  /// Content moderation, independent of the decision above.
+  visibility       ContentStatus  @default(VISIBLE)
+  moderatedById    String?
+  moderatedBy      User?          @relation("ProposalModerator", fields: [moderatedById], references: [id], onDelete: SetNull)
+  moderatedAt      DateTime?
+  moderationReason String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  votes   FeatureVote[]
+  reports ContentReport[]
+
+  @@index([visibility, status, createdAt(sort: Desc), id])
+  @@index([authorId, createdAt])
+  @@map("feature_proposal")
+}
+
+model FeatureVote {
+  id         String          @id @default(uuid(7))
+  proposalId String
+  proposal   FeatureProposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime        @default(now())
+
+  /// One vote per user per proposal, enforced by the database.
+  @@unique([proposalId, userId])
+  @@index([userId])
+  @@map("feature_vote")
+}
+
+/// A report about one piece of content. Exactly one target column is set and it
+/// must match targetType (CHECK in the migration). `targetKey` ("POST:<id>")
+/// makes (reporter, target) unique, so a user cannot report the same item twice.
+/// Reporting never hides anything: only a moderation action changes visibility.
+model ContentReport {
+  id             String           @id @default(uuid(7))
+  reporterId     String
+  reporter       User             @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Restrict)
+  targetType     ReportTargetType
+  targetKey      String
+  postId         String?
+  post           CommunityPost?   @relation(fields: [postId], references: [id], onDelete: Restrict)
+  commentId      String?
+  comment        PostComment?     @relation(fields: [commentId], references: [id], onDelete: Restrict)
+  reviewId       String?
+  review         Review?          @relation(fields: [reviewId], references: [id], onDelete: Restrict)
+  proposalId     String?
+  proposal       FeatureProposal? @relation(fields: [proposalId], references: [id], onDelete: Restrict)
+  reason         ReportReason
+  details        String?
+  status         ReportStatus     @default(OPEN)
+  reviewedById   String?
+  reviewedBy     User?            @relation("ReportReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  decisionNote   String?
+  resolvedAt     DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@unique([reporterId, targetKey])
+  @@index([status, createdAt, id])
+  @@index([targetType, status])
+  @@index([postId])
+  @@index([commentId])
+  @@index([reviewId])
+  @@index([proposalId])
+  @@map("content_report")
 }

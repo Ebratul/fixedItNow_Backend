@@ -62,6 +62,17 @@ const schema = z
     SSLCOMMERZ_STORE_PASSWORD: optionalString,
     SSLCOMMERZ_IS_LIVE: boolean.default(false),
     SSLCOMMERZ_REFUNDS_ENABLED: boolean.default(false),
+
+    // AI assistant (Step 8). The Python service lives in rag_agent/. The assistant
+    // is ENABLED only when all three are set; with none set /ai/chat answers 503
+    // and the normal search keeps working. Two DIFFERENT secrets, one per direction:
+    //   AI_SERVICE_TOKEN       - this API presents it to the AI service
+    //   APP_API_SERVICE_TOKEN  - the AI service presents it to /internal/ai/*
+    AI_SERVICE_URL: optionalString,
+    AI_SERVICE_TOKEN: optionalString,
+    APP_API_SERVICE_TOKEN: optionalString,
+    AI_REQUEST_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(30),
+    AI_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(600).default(10),
   })
   .superRefine((env, ctx) => {
     const issue = (path: string, message: string) =>
@@ -106,6 +117,26 @@ const schema = z
     if (Boolean(env.SSLCOMMERZ_STORE_ID) !== Boolean(env.SSLCOMMERZ_STORE_PASSWORD)) {
       issue("SSLCOMMERZ_STORE_ID", "Set both SSLCOMMERZ_STORE_ID and SSLCOMMERZ_STORE_PASSWORD, or neither");
     }
+    const aiVars = [env.AI_SERVICE_URL, env.AI_SERVICE_TOKEN, env.APP_API_SERVICE_TOKEN];
+    if (aiVars.some(Boolean) && !aiVars.every(Boolean)) {
+      issue("AI_SERVICE_URL", "Set all of AI_SERVICE_URL, AI_SERVICE_TOKEN, APP_API_SERVICE_TOKEN, or none");
+    }
+    if (env.AI_SERVICE_URL) {
+      try {
+        const url = new URL(env.AI_SERVICE_URL);
+        if (url.protocol !== "http:" && url.protocol !== "https:") issue("AI_SERVICE_URL", "Must be an http(s) URL");
+        if (url.username || url.password) issue("AI_SERVICE_URL", "Must not contain credentials");
+      } catch {
+        issue("AI_SERVICE_URL", "Must be a valid URL");
+      }
+    }
+    for (const name of ["AI_SERVICE_TOKEN", "APP_API_SERVICE_TOKEN"] as const) {
+      const token = env[name];
+      if (token && token.length < 32) issue(name, `${name} must be at least 32 characters`);
+    }
+    if (env.AI_SERVICE_TOKEN && env.AI_SERVICE_TOKEN === env.APP_API_SERVICE_TOKEN) {
+      issue("APP_API_SERVICE_TOKEN", "Must differ from AI_SERVICE_TOKEN");
+    }
     // Live credentials are only accepted by a production deployment.
     if (env.NODE_ENV !== "production") {
       if (env.BKASH_IS_LIVE && env.BKASH_BASE_URL) issue("BKASH_IS_LIVE", "Live bKash is only allowed when NODE_ENV=production");
@@ -149,6 +180,8 @@ export type Env = Omit<z.infer<typeof schema>, "MAIL_TRANSPORT"> & {
   } | null;
   /** null = SSLCOMMERZ is not configured (unavailable). */
   sslcommerz: { storeId: string; storePassword: string; isLive: boolean; refundsEnabled: boolean } | null;
+  /** null = the AI assistant is not configured (unavailable). */
+  ai: { serviceUrl: string; serviceToken: string; appApiToken: string; timeoutMs: number; ratePerMinute: number } | null;
 };
 
 export function loadEnv(source: Record<string, string | undefined> = process.env): Env {
@@ -190,6 +223,18 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
             storePassword: env.SSLCOMMERZ_STORE_PASSWORD,
             isLive: env.SSLCOMMERZ_IS_LIVE,
             refundsEnabled: env.SSLCOMMERZ_REFUNDS_ENABLED,
+          }
+        : null,
+    ai:
+      env.AI_SERVICE_URL && env.AI_SERVICE_TOKEN && env.APP_API_SERVICE_TOKEN
+        ? {
+            serviceUrl: env.AI_SERVICE_URL.replace(/\/+$/, ""),
+            serviceToken: env.AI_SERVICE_TOKEN,
+            appApiToken: env.APP_API_SERVICE_TOKEN,
+            // A request may make two sequential provider calls (intent, then a knowledge
+            // answer); the service gives up after that, so wait slightly longer.
+            timeoutMs: env.AI_REQUEST_TIMEOUT_SECONDS * 2 * 1000 + 10_000,
+            ratePerMinute: env.AI_RATE_LIMIT_PER_MINUTE,
           }
         : null,
   };

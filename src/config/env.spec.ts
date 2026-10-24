@@ -96,3 +96,38 @@ describe("loadEnv", () => {
     });
   });
 });
+
+describe("AI assistant configuration", () => {
+  const base = {
+    DATABASE_URL: "postgresql://u:p@localhost:5432/db",
+    BETTER_AUTH_SECRET: "x".repeat(32),
+    BETTER_AUTH_URL: "http://localhost:3000",
+    FRONTEND_ORIGIN: "http://localhost:3000",
+  };
+  const ai = { AI_SERVICE_URL: "http://localhost:8000", AI_SERVICE_TOKEN: "a".repeat(40), APP_API_SERVICE_TOKEN: "b".repeat(40) };
+
+  it("is unavailable (null) unless URL and both tokens are set", () => {
+    expect(loadEnv(base).ai).toBeNull();
+    expect(() => loadEnv({ ...base, AI_SERVICE_URL: ai.AI_SERVICE_URL })).toThrow(/Set all of AI_SERVICE_URL/);
+    expect(() => loadEnv({ ...base, AI_SERVICE_TOKEN: ai.AI_SERVICE_TOKEN })).toThrow(/Set all of AI_SERVICE_URL/);
+    expect(loadEnv({ ...base, ...ai }).ai).toMatchObject({ serviceUrl: "http://localhost:8000", ratePerMinute: 10, timeoutMs: 70_000 });
+  });
+
+  it("requires long, distinct secrets and a clean URL", () => {
+    expect(() => loadEnv({ ...base, ...ai, AI_SERVICE_TOKEN: "short" })).toThrow(/at least 32/);
+    expect(() => loadEnv({ ...base, ...ai, APP_API_SERVICE_TOKEN: ai.AI_SERVICE_TOKEN })).toThrow(/must differ/i);
+    expect(() => loadEnv({ ...base, ...ai, AI_SERVICE_URL: "ftp://x" })).toThrow(/http\(s\)/);
+    expect(() => loadEnv({ ...base, ...ai, AI_SERVICE_URL: "http://user:pw@host:8000" })).toThrow(/credentials/);
+    expect(() => loadEnv({ ...base, ...ai, AI_RATE_LIMIT_PER_MINUTE: "0" })).toThrow(/AI_RATE_LIMIT_PER_MINUTE/);
+  });
+
+  it("never echoes a secret in the error text", () => {
+    try {
+      loadEnv({ ...base, ...ai, APP_API_SERVICE_TOKEN: "tiny" });
+      throw new Error("expected failure");
+    } catch (error) {
+      expect(String(error)).not.toContain(ai.AI_SERVICE_TOKEN);
+      expect(String(error)).not.toContain("tiny");
+    }
+  });
+});

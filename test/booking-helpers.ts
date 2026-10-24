@@ -61,3 +61,17 @@ export const quoteBody = (extra: object = {}) => ({
   description: "Gas refill and filter cleaning, parts included.",
   ...extra,
 });
+
+/** request -> accept -> start -> complete -> confirm: a COMPLETED booking. Leaves the fake clock inside the appointment. */
+export async function completedBooking(t: TestApp, cust: Person, worker: Worker, extra: object = {}) {
+  const start = at(t, 3, 10);
+  const id = await confirmedBooking(t, cust, worker, start, extra);
+  t.clock.set(new Date(start.getTime() - 10 * 60_000));
+  const started = await worker.agent.post(`${t.api}/bookings/${id}/start`).send({});
+  if (started.status !== 200) throw new Error(`start failed ${started.status}`);
+  const done = await worker.agent.post(`${t.api}/bookings/${id}/complete`).send({});
+  if (done.status !== 200) throw new Error(`complete failed ${done.status}`);
+  const confirmed = await cust.agent.post(`${t.api}/bookings/${id}/confirm-completion`).send({});
+  if (confirmed.status !== 200) throw new Error(`confirm failed ${confirmed.status}`);
+  return id;
+}

@@ -5,6 +5,7 @@ import { AppModule } from "../src/app.module.js";
 import { configureApp } from "../src/app.setup.js";
 import { ENV, loadEnv } from "../src/config/env.js";
 import { Clock } from "../src/bookings/clock.js";
+import { AiClient } from "../src/ai/ai-client.js";
 import { MailService } from "../src/mail/mail.service.js";
 import { HttpClient } from "../src/payments/providers/http.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
@@ -28,7 +29,7 @@ export const PASSWORD = "correct-horse-battery";
 
 export type TestApp = Awaited<ReturnType<typeof createTestApp>>;
 
-export async function createTestApp(overrides: Record<string, string> = {}) {
+export async function createTestApp(overrides: Record<string, string> = {}, fakes: { aiClient?: Pick<AiClient, "chat"> } = {}) {
   const env = loadEnv({
     NODE_ENV: "test",
     DATABASE_URL: testDatabaseUrl(),
@@ -44,14 +45,16 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   const clock = new FakeClock();
   // Tests never reach a real payment provider: the HTTP client is always the fake.
   const net = new FakeProviderNet();
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  let builder = Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(ENV)
     .useValue(env)
     .overrideProvider(Clock)
     .useValue(clock)
     .overrideProvider(HttpClient)
-    .useValue(net)
-    .compile();
+    .useValue(net);
+  // Tests never reach the real AI service: when a fake is given it replaces the client.
+  if (fakes.aiClient) builder = builder.overrideProvider(AiClient).useValue(fakes.aiClient);
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication<NestExpressApplication>({
     bodyParser: false,

@@ -3,6 +3,7 @@ import type { AuthContext } from "../auth/auth.types.js";
 import type { BookingStatus, Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { ELIGIBLE_WORKER } from "../workers/eligibility.js";
+import { reviewSummary } from "../reviews/review.summary.js";
 import { paymentSummary } from "../payments/payment.summary.js";
 import { AvailabilityService, lockWorker } from "./availability.service.js";
 import {
@@ -304,6 +305,7 @@ export class BookingsService {
       dispute,
       events,
       payment: await paymentSummary(tx, booking, viewer),
+      review: await reviewSummary(tx, booking, viewer, now),
     };
   }
 

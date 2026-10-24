@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import type { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { NO_REVIEWS, ratingSummaries, type RatingSummary } from "../reviews/ratings.js";
 import { ELIGIBLE_WORKER } from "./eligibility.js";
 import { isValidSlug } from "./slug.js";
 import { searchTerms, type SearchQuery, type WorkerSort } from "./workers.schema.js";
@@ -58,10 +59,10 @@ type ProfileRow = Prisma.WorkerProfileGetPayload<{ select: typeof profileSelect 
 
 /**
  * Public card shape. `verification` is "VERIFIED" for every listed worker by
- * construction (see ELIGIBLE_WORKER). Ratings do not exist yet (no reviews
- * feature), so they are explicitly null/0 rather than invented.
+ * construction (see ELIGIBLE_WORKER). `rating`/`reviewCount` come from counted
+ * reviews only (reviews/ratings.ts); a worker with none is null/0, never invented.
  */
-export function toCard(row: CardRow) {
+export function toCard(row: CardRow, summary: RatingSummary = NO_REVIEWS) {
   const categories = row.services.map((s) => s.category);
   return {
     id: row.id,
@@ -74,15 +75,15 @@ export function toCard(row: CardRow) {
     experienceYears: row.experienceYears,
     startingPriceBdt: row.startingPriceBdt,
     verification: "VERIFIED" as const,
-    rating: null,
-    reviewCount: 0,
+    rating: summary.rating,
+    reviewCount: summary.reviewCount,
     publishedAt: row.publishedAt,
   };
 }
 
-function toProfile(row: ProfileRow) {
+function toProfile(row: ProfileRow, summary: RatingSummary) {
   return {
-    ...toCard({ ...row, services: row.services }),
+    ...toCard({ ...row, services: row.services }, summary),
     bio: row.bio,
     languages: row.languages,
     updatedAt: row.updatedAt,
@@ -115,46 +116,52 @@ const ORDERINGS: Record<WorkerSort, Prisma.WorkerProfileOrderByWithRelationInput
   ],
 };
 
+/**
+ * The ONE place a public search `where` is built. Visibility is enforced by
+ * spreading ELIGIBLE_WORKER first, so no filter can widen the result set. Text
+ * matching uses Prisma's parameterised `contains` (case-insensitive); no SQL is
+ * built from input. Each whitespace-separated term must match the name,
+ * headline, bio, or an active category name (AND across terms, OR across fields).
+ */
+export function buildSearchWhere(
+  query: Pick<SearchQuery, "q" | "category" | "location" | "maxPrice" | "minExperience">,
+): Prisma.WorkerProfileWhereInput {
+  const terms = searchTerms(query.q);
+  return {
+    ...ELIGIBLE_WORKER,
+    AND: terms.map((term) => ({
+      OR: [
+        { displayName: { contains: term, mode: "insensitive" } },
+        { headline: { contains: term, mode: "insensitive" } },
+        { bio: { contains: term, mode: "insensitive" } },
+        {
+          services: {
+            some: {
+              category: { isActive: true, name: { contains: term, mode: "insensitive" } },
+            },
+          },
+        },
+      ],
+    })),
+    ...(query.category && {
+      services: { some: { category: { slug: query.category, isActive: true } } },
+    }),
+    ...(query.location && { serviceAreas: { has: query.location } }),
+    // Workers with no priced service (quote-only) are excluded by a price cap.
+    ...(query.maxPrice !== undefined && { startingPriceBdt: { lte: query.maxPrice } }),
+    ...(query.minExperience !== undefined && {
+      experienceYears: { gte: query.minExperience },
+    }),
+  };
+}
+
 @Injectable()
 export class WorkersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /**
-   * Public search. Visibility is enforced by spreading ELIGIBLE_WORKER first,
-   * so no filter or sort can widen the result set. Text matching uses Prisma's
-   * parameterised `contains` (case-insensitive); no SQL is built from input.
-   *
-   * Each whitespace-separated term must match the name, headline, bio, or an
-   * active category name (AND across terms, OR across fields).
-   */
+  /** Public search (see buildSearchWhere for the visibility and matching rules). */
   async search(query: SearchQuery) {
-    const terms = searchTerms(query.q);
-    const where: Prisma.WorkerProfileWhereInput = {
-      ...ELIGIBLE_WORKER,
-      AND: terms.map((term) => ({
-        OR: [
-          { displayName: { contains: term, mode: "insensitive" } },
-          { headline: { contains: term, mode: "insensitive" } },
-          { bio: { contains: term, mode: "insensitive" } },
-          {
-            services: {
-              some: {
-                category: { isActive: true, name: { contains: term, mode: "insensitive" } },
-              },
-            },
-          },
-        ],
-      })),
-      ...(query.category && {
-        services: { some: { category: { slug: query.category, isActive: true } } },
-      }),
-      ...(query.location && { serviceAreas: { has: query.location } }),
-      // Workers with no priced service (quote-only) are excluded by a price cap.
-      ...(query.maxPrice !== undefined && { startingPriceBdt: { lte: query.maxPrice } }),
-      ...(query.minExperience !== undefined && {
-        experienceYears: { gte: query.minExperience },
-      }),
-    };
+    const where = buildSearchWhere(query);
 
     const [total, rows] = await this.prisma.$transaction([
       this.prisma.workerProfile.count({ where }),
@@ -167,14 +174,34 @@ export class WorkersService {
       }),
     ]);
 
+    const ratings = await ratingSummaries(this.prisma, rows.map((r) => r.id));
     return {
-      workers: rows.map(toCard),
+      workers: rows.map((r) => toCard(r, ratings.get(r.id))),
       page: query.page,
       pageSize: query.pageSize,
       total,
       totalPages: Math.ceil(total / query.pageSize),
       sort: query.sort,
     };
+  }
+
+  /**
+   * Re-reads the given ids as public cards, applying the same visibility rule
+   * and the same filters as a search. Unknown, hidden, suspended and
+   * filter-violating ids are simply absent from the result. Used to ground
+   * references that came from another service.
+   */
+  async findCardsByIds(
+    ids: string[],
+    filters: Pick<SearchQuery, "category" | "location" | "maxPrice" | "minExperience">,
+  ) {
+    if (ids.length === 0) return [];
+    const rows = await this.prisma.workerProfile.findMany({
+      where: { AND: [buildSearchWhere(filters), { id: { in: ids } }] },
+      select: cardSelect,
+    });
+    const ratings = await ratingSummaries(this.prisma, rows.map((r) => r.id));
+    return rows.map((r) => toCard(r, ratings.get(r.id)));
   }
 
   /**
@@ -188,6 +215,6 @@ export class WorkersService {
       select: profileSelect,
     });
     if (!row) throw new NotFoundException("Professional not found");
-    return toProfile(row);
+    return toProfile(row, (await ratingSummaries(this.prisma, [row.id])).get(row.id) ?? NO_REVIEWS);
   }
 }
