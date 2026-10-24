@@ -22,4 +22,6 @@ export function configureApp(app: NestExpressApplication) {
   app.getHttpAdapter().getInstance().all(`${AUTH_BASE_PATH}/*splat`, toNodeHandler(auth));
 
   app.useBodyParser("json", { limit: "100kb" });
+  // SSLCOMMERZ posts its success/fail/cancel/IPN notifications form-encoded.
+  app.useBodyParser("urlencoded", { extended: false, limit: "100kb" });
 }

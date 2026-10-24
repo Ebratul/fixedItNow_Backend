@@ -11,6 +11,7 @@ import { ApprovedWorkerGuard } from "./approved-worker.guard.js";
 import type { AuthContext, WorkerContext } from "./auth.types.js";
 
 export const IS_PUBLIC = "isPublic";
+export const SKIP_ORIGIN_CHECK = "skipOriginCheck";
 
 /**
  * Opt a route OUT of authentication. Every route requires a valid session by
@@ -42,3 +43,12 @@ export const CurrentWorker = createParamDecorator(
     return req.worker!;
   },
 );
+
+/**
+ * Exempt a route from the browser-Origin (CSRF) check. ONLY for provider
+ * callbacks, which are cross-site by nature (the payment provider's page posts
+ * the customer's browser back to us, or the provider's server calls us). Such a
+ * route must also be @Public(), must not use cookies, and must treat every field
+ * as untrusted. A test asserts this decorator appears nowhere else.
+ */
+export const SkipOriginCheck = () => SetMetadata(SKIP_ORIGIN_CHECK, true);

@@ -16,6 +16,7 @@ import { MeController } from "./me/me.controller.js";
 import { MeService } from "./me/me.service.js";
 import { FavoritesController } from "./favorites/favorites.controller.js";
 import { FavoritesService } from "./favorites/favorites.service.js";
+import { PaymentsModule } from "./payments/payments.module.js";
 import { PrismaModule } from "./prisma/prisma.module.js";
 import { WorkersController } from "./workers/workers.controller.js";
 import { WorkersService } from "./workers/workers.service.js";
@@ -29,6 +30,7 @@ import { WorkerProfileService } from "./worker/worker-profile.service.js";
     MailModule,
     AuthModule,
     BookingsModule,
+    PaymentsModule,
     ThrottlerModule.forRootAsync({
       inject: [ENV],
       useFactory: (env: Env) => ({

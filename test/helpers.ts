@@ -6,7 +6,9 @@ import { configureApp } from "../src/app.setup.js";
 import { ENV, loadEnv } from "../src/config/env.js";
 import { Clock } from "../src/bookings/clock.js";
 import { MailService } from "../src/mail/mail.service.js";
+import { HttpClient } from "../src/payments/providers/http.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
+import { FakeProviderNet } from "./fake-providers.js";
 import { testDatabaseUrl } from "./test-db.js";
 
 /** Controllable time for the booking domain (the real clock is never slept on). */
@@ -40,11 +42,15 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   });
 
   const clock = new FakeClock();
+  // Tests never reach a real payment provider: the HTTP client is always the fake.
+  const net = new FakeProviderNet();
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(ENV)
     .useValue(env)
     .overrideProvider(Clock)
     .useValue(clock)
+    .overrideProvider(HttpClient)
+    .useValue(net)
     .compile();
 
   const app = moduleRef.createNestApplication<NestExpressApplication>({
@@ -64,9 +70,10 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
 
   async function resetData() {
     await prisma.$executeRawUnsafe(
-      `TRUNCATE "dispute_message","dispute","booking_event","reschedule_request","quote","booking","worker_time_off","worker_availability_rule","audit_log","favorite","worker_service","worker_profile","customer_profile","session","account","verification","rateLimit","user" CASCADE`,
+      `TRUNCATE "payment_event","refund","payment","dispute_message","dispute","booking_event","reschedule_request","quote","booking","worker_time_off","worker_availability_rule","audit_log","favorite","worker_service","worker_profile","customer_profile","session","account","verification","rateLimit","user" CASCADE`,
     );
     mail.outbox.length = 0;
+    net.reset();
     clock.set("2026-11-01T06:00:00Z");
   }
 
@@ -136,7 +143,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   }
 
   return {
-    app, prisma, mail, env, clock, api, client, resetData, lastLink, signUpAndLogin, makeAdmin,
+    app, prisma, mail, env, clock, net, api, client, resetData, lastLink, signUpAndLogin, makeAdmin,
     newAdmin, createWorker,
     close: () => app.close(),
   };

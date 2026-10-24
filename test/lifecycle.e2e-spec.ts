@@ -237,7 +237,7 @@ describe("booking lifecycle", () => {
       expect((await row(id)).status).toBe("REQUESTED");
     });
 
-    it("marks late cancellations and flags paid-booking review without inventing any refund", async () => {
+    it("marks late cancellations and flags paid-booking review without creating any payment or refund", async () => {
       const w = await bookableWorker(t);
       const c = await customer(t);
       const early = await confirmedBooking(t, c, w, at(t, 5, 10));
@@ -248,9 +248,9 @@ describe("booking lifecycle", () => {
       const meta = async (id: string) => (await t.prisma.bookingEvent.findFirstOrThrow({ where: { bookingId: id, type: "booking.cancelled" } })).metadata as any;
       expect(await meta(early)).toMatchObject({ wasConfirmed: true, lateCancellation: false, paymentReviewRequired: true });
       expect(await meta(late)).toMatchObject({ wasConfirmed: true, lateCancellation: true, paymentReviewRequired: true });
-      // No payment objects exist at all in this step.
-      const tables = await t.prisma.$queryRaw<{ table_name: string }[]>`SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name ILIKE '%payment%'`;
-      expect(tables).toHaveLength(0);
+      // Cancelling only records a marker for review: it creates no payment and no refund, and moves no money.
+      expect(await t.prisma.payment.count()).toBe(0);
+      expect(await t.prisma.refund.count()).toBe(0);
     });
 
     it("cancellation closes pending quotes and reschedule requests in the same transaction", async () => {

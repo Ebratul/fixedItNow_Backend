@@ -68,6 +68,7 @@ model User {
   auditLogs        AuditLog[]
   favorites        Favorite[]
   customerBookings Booking[]        @relation("CustomerBookings")
+  customerPayments Payment[]        @relation("CustomerPayments")
 
   @@map("user")
 }
@@ -419,6 +420,7 @@ model Booking {
   events             BookingEvent[]
   rescheduleRequests RescheduleRequest[]
   dispute            Dispute?
+  payments           Payment[]
 
   @@unique([customerId, idempotencyKey])
   @@index([customerId, createdAt])
@@ -530,4 +532,166 @@ model DisputeMessage {
 
   @@index([disputeId, createdAt])
   @@map("dispute_message")
+}
+
+// ---------------------------------------------------------------------------
+// Payments (Step 6)
+//
+// Money is whole BDT (integer), like bookings. A payment row is ONE attempt to
+// pay a booking through ONE provider. Its status only ever becomes SUCCEEDED
+// after the backend verified the transaction with the provider (never from a
+// redirect or client input). Constraints Prisma cannot model (partial unique
+// indexes, CHECKs, the append-only trigger) live in
+// prisma/migrations/*_step6_payments/migration.sql. See docs/PAYMENTS.md.
+// ---------------------------------------------------------------------------
+
+enum PaymentProvider {
+  BKASH
+  SSLCOMMERZ
+}
+
+enum PaymentStatus {
+  /// Row created; the provider has not been called yet (or the call has not been recorded).
+  PENDING
+  /// Provider session created; waiting for the customer to pay.
+  INITIATED
+  /// Callback received / outcome not yet verified (or ambiguous).
+  PROCESSING
+  /// Verified with the provider: amount, currency and reference matched.
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  EXPIRED
+  /// The provider reports money moved but the platform could not accept it
+  /// automatically (mismatch, duplicate payment, provider risk flag).
+  REQUIRES_REVIEW
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum PaymentReviewReason {
+  AMOUNT_MISMATCH
+  CURRENCY_MISMATCH
+  REFERENCE_MISMATCH
+  DUPLICATE_PAYMENT
+  PROVIDER_RISK_FLAG
+  /// Paid successfully, but the booking was no longer payable (cancelled, disputed...).
+  BOOKING_INELIGIBLE
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REJECTED
+}
+
+model Payment {
+  id        String @id @default(uuid(7))
+  /// Opaque public reference (also the provider-facing transaction id). Not the primary key.
+  reference String @unique
+
+  bookingId  String
+  booking    Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  customerId String
+  customer   User    @relation("CustomerPayments", fields: [customerId], references: [id], onDelete: Restrict)
+
+  provider  PaymentProvider
+  /// Sandbox vs live, fixed when the attempt is created.
+  isLive    Boolean         @default(false)
+  status    PaymentStatus   @default(PENDING)
+  amountBdt Int
+  currency  String          @default("BDT")
+  /// Sum of provider-confirmed refunds only.
+  refundedAmountBdt Int     @default(0)
+
+  idempotencyKey        String?
+  /// bKash paymentId / SSLCOMMERZ session key.
+  providerPaymentId     String?
+  /// bKash trxId / SSLCOMMERZ bank_tran_id (needed for refunds).
+  providerTransactionId String?
+  /// SSLCOMMERZ val_id.
+  providerValidationId  String?
+  checkoutUrl           String?
+  failureCode           String?
+  reviewReason          PaymentReviewReason?
+
+  initiatedAt          DateTime?
+  callbackReceivedAt   DateTime?
+  /// bKash allows ONE execute call per paymentId; set by whoever claims it.
+  executeStartedAt     DateTime?
+  lastVerifiedAt       DateTime?
+  verificationAttempts Int       @default(0)
+  succeededAt          DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  events  PaymentEvent[]
+  refunds Refund[]
+
+  @@unique([customerId, idempotencyKey])
+  @@unique([provider, providerPaymentId])
+  @@unique([provider, providerTransactionId])
+  @@index([bookingId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([status, createdAt])
+  @@map("payment")
+}
+
+/// Append-only financial history. UPDATE and DELETE are rejected by a trigger.
+model PaymentEvent {
+  id          String         @id @default(uuid(7))
+  paymentId   String
+  payment     Payment        @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  refundId    String?
+  type        String
+  fromStatus  PaymentStatus?
+  toStatus    PaymentStatus?
+  actorUserId String?
+  actorRole   ActorRole
+  /// Makes recording the same fact twice impossible (replayed callbacks).
+  dedupeKey   String?        @unique
+  /// Sanitised: never credentials, tokens, card data or raw provider payloads.
+  metadata    Json?
+  createdAt   DateTime       @default(now())
+
+  @@index([paymentId, createdAt])
+  @@map("payment_event")
+}
+
+model Refund {
+  id        String  @id @default(uuid(7))
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  requestedByUserId  String
+  requestedByRole    ActorRole
+  requestedAmountBdt Int
+  approvedAmountBdt  Int?
+  reason             String
+  status             RefundStatus @default(REQUESTED)
+
+  decidedByUserId String?
+  decidedAt       DateTime?
+  decisionNote    String?
+
+  /// Our unique id for this refund, sent to the provider where it takes one.
+  providerRefundReference String  @unique
+  /// Provider's refund id (SSLCOMMERZ refund_ref_id / bKash refundTrxId), once known.
+  providerRefundId        String?
+  failureCode             String?
+  processStartedAt        DateTime?
+  lastVerifiedAt          DateTime?
+  completedAt             DateTime?
+
+  idempotencyKey String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([requestedByUserId, idempotencyKey])
+  @@index([paymentId, createdAt])
+  @@index([status, createdAt])
+  @@map("refund")
 }
