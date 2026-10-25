@@ -44,7 +44,12 @@ export class PrismaService extends PrismaClient implements OnModuleDestroy {
         (error: Error) => callback(error),
       );
     }) as typeof pool.connect;
-    super({ adapter: new PrismaPg(pool, { disposeExternalPool: true }) });
+    super({
+      adapter: new PrismaPg(pool, { disposeExternalPool: true }),
+      // Prisma's default maxWait is 2 s, which a cold instance (new TLS connection to a remote pooler plus the SET above)
+      // can exceed on its first request, failing it with P2028. Wait as long as the connect timeout instead.
+      transactionOptions: { maxWait: env.DATABASE_CONNECT_TIMEOUT_MS, timeout: env.DATABASE_STATEMENT_TIMEOUT_MS },
+    });
   }
 
   async onModuleDestroy() {
