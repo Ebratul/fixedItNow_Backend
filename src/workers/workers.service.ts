@@ -144,7 +144,8 @@ export function buildSearchWhere(
       ],
     })),
     ...(query.category && {
-      services: { some: { category: { slug: query.category, isActive: true } } },
+      // A parent category also matches workers listed under its (active) subcategories.
+      services: { some: { category: { isActive: true, OR: [{ slug: query.category }, { parent: { slug: query.category, isActive: true } }] } } },
     }),
     ...(query.location && { serviceAreas: { has: query.location } }),
     // Workers with no priced service (quote-only) are excluded by a price cap.

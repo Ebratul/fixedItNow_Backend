@@ -1,17 +1,20 @@
 import { Controller, Get, NotFoundException, Param } from "@nestjs/common";
 import { Public } from "../auth/decorators.js";
+import type { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { ELIGIBLE_WORKER } from "../workers/eligibility.js";
 
 /**
- * Read-only on purpose. There is no create/update/delete endpoint: categories
- * are managed through the seed/migration process until an admin UI exists.
+ * Read-only and public. Categories are managed by administrators (see admin/categories).
+ * The list is the top-level categories, each with its active subcategories nested. Worker
+ * counts are computed from publicly visible workers; a parent also counts the workers listed
+ * under any of its subcategories (each worker once).
  */
 @Controller("categories")
 export class CategoriesController {
   constructor(private readonly prisma: PrismaService) {}
 
-  private readonly select = {
+  private readonly base = {
     slug: true,
     name: true,
     description: true,
@@ -19,19 +22,44 @@ export class CategoriesController {
     _count: { select: { workerServices: { where: { workerProfile: ELIGIBLE_WORKER } } } },
   } as const;
 
-  /** Active categories with a COMPUTED count of listed professionals. */
+  private readonly childSelect = {
+    where: { isActive: true },
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    select: this.base,
+  } satisfies Prisma.ServiceCategory$childrenArgs;
+
+  /** Distinct visible workers with a service in this parent or any of its active subcategories. */
+  private async parentCounts(slugs: string[]) {
+    if (slugs.length === 0) return new Map<string, number>();
+    const rows = await this.prisma.$queryRaw<{ slug: string; workers: number }[]>`
+      SELECT p."slug" AS slug, COUNT(DISTINCT ws."workerProfileId")::int AS workers
+      FROM "service_category" p
+      JOIN "service_category" c ON c."id" = p."id" OR (c."parentId" = p."id" AND c."isActive")
+      JOIN "worker_service" ws ON ws."categoryId" = c."id"
+      JOIN "worker_profile" wp ON wp."id" = ws."workerProfileId"
+      JOIN "user" u ON u."id" = wp."userId"
+      WHERE p."slug" = ANY(${slugs}) AND p."isActive"
+        AND wp."onboardingStatus" = 'SUBMITTED' AND wp."verificationStatus" = 'VERIFIED'
+        AND wp."publishedAt" IS NOT NULL AND wp."suspendedAt" IS NULL AND wp."slug" IS NOT NULL AND u."suspendedAt" IS NULL
+      GROUP BY p."slug"`;
+    return new Map(rows.map((r) => [r.slug, r.workers]));
+  }
+
+  /** Active top-level categories with their active subcategories and COMPUTED counts of listed professionals. */
   @Public()
   @Get()
   async list() {
     const rows = await this.prisma.serviceCategory.findMany({
-      where: { isActive: true },
+      where: { isActive: true, parentId: null },
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-      select: this.select,
+      select: { ...this.base, children: this.childSelect },
     });
+    const counts = await this.parentCounts(rows.map((r) => r.slug));
     return {
-      categories: rows.map(({ _count, ...category }) => ({
+      categories: rows.map(({ _count, children, ...category }) => ({
         ...category,
-        workerCount: _count.workerServices,
+        workerCount: counts.get(category.slug) ?? 0,
+        subcategories: children.map(({ _count: childCount, ...child }) => ({ ...child, workerCount: childCount.workerServices })),
       })),
     };
   }
@@ -42,11 +70,19 @@ export class CategoriesController {
     const row = /^[a-z0-9-]{1,50}$/.test(slug)
       ? await this.prisma.serviceCategory.findFirst({
           where: { slug, isActive: true },
-          select: this.select,
+          select: { ...this.base, parent: { select: { slug: true, name: true, isActive: true } }, children: this.childSelect },
         })
       : null;
-    if (!row) throw new NotFoundException("Category not found");
-    const { _count, ...category } = row;
-    return { category: { ...category, workerCount: _count.workerServices } };
+    if (!row || (row.parent && !row.parent.isActive)) throw new NotFoundException("Category not found");
+    const { _count, children, parent, ...category } = row;
+    const workerCount = parent ? _count.workerServices : (await this.parentCounts([category.slug])).get(category.slug) ?? 0;
+    return {
+      category: {
+        ...category,
+        workerCount,
+        parent: parent ? { slug: parent.slug, name: parent.name } : null,
+        subcategories: children.map(({ _count: childCount, ...child }) => ({ ...child, workerCount: childCount.workerServices })),
+      },
+    };
   }
 }

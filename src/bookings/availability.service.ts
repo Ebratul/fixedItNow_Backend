@@ -9,7 +9,7 @@ import {
   MIN_LEAD_MINUTES,
   SLOT_MINUTES,
 } from "./booking.config.js";
-import { RESERVING_STATUSES } from "./booking.state.js";
+import { SLOT_HOLDING_STATUSES } from "./booking.state.js";
 import { Clock } from "./clock.js";
 import { conflict, unprocessable } from "./domain-errors.js";
 import { addDays, addMinutes, isOnGrid, localInstant, localParts, overlaps, weekdayOf } from "./time.js";
@@ -95,7 +95,7 @@ export class AvailabilityService {
       const clash = await tx.booking.findFirst({
         where: {
           workerProfileId,
-          status: { in: RESERVING_STATUSES },
+          status: { in: SLOT_HOLDING_STATUSES },
           startAt: { lt: endAt },
           endAt: { gt: startAt },
         },
@@ -162,7 +162,7 @@ export class AvailabilityService {
     const taken = await db.booking.findFirst({
       where: {
         workerProfileId,
-        status: { in: RESERVING_STATUSES },
+        status: { in: SLOT_HOLDING_STATUSES },
         startAt: { lt: end },
         endAt: { gt: start },
         ...(excludeBookingId && { id: { not: excludeBookingId } }),
@@ -203,7 +203,7 @@ export class AvailabilityService {
       this.prisma.booking.findMany({
         where: {
           workerProfileId: worker.id,
-          status: { in: RESERVING_STATUSES },
+          status: { in: SLOT_HOLDING_STATUSES },
           startAt: { lt: rangeEnd },
           endAt: { gt: rangeStart },
         },

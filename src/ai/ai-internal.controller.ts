@@ -35,6 +35,22 @@ export class AiInternalController {
     return this.workers.search({ ...query, page: 1, pageSize: Math.min(query.pageSize, 24) });
   }
 
+  /**
+   * The assistant's admin-managed knowledge: PUBLISHED documents only (drafts and archived ones never
+   * leave the database). The AI service re-validates every field and treats the text as reference
+   * material, never as instructions.
+   */
+  @Get("knowledge")
+  async knowledge() {
+    const rows = await this.prisma.knowledgeDocument.findMany({
+      where: { status: "PUBLISHED" },
+      orderBy: { slug: "asc" },
+      take: 200,
+      select: { slug: true, title: true, url: true, body: true, version: true },
+    });
+    return { documents: rows.map((r) => ({ id: r.slug, title: r.title, url: r.url, body: r.body, version: r.version })) };
+  }
+
   @Get("categories")
   async categories() {
     const rows = await this.prisma.serviceCategory.findMany({

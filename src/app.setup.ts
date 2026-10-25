@@ -27,6 +27,7 @@ export function configureApp(app: NestExpressApplication) {
   app.getHttpAdapter().getInstance().all(`${AUTH_BASE_PATH}/*splat`, toNodeHandler(auth));
 
   app.useBodyParser("json", { limit: "100kb" });
-  // SSLCOMMERZ posts its success/fail/cancel/IPN notifications form-encoded.
-  app.useBodyParser("urlencoded", { extended: false, limit: "100kb" });
+  // Identity-document upload: the body IS the image. Only these image types are parsed (as a Buffer);
+  // the route re-checks the real content, and any other content type leaves req.body non-Buffer.
+  app.useBodyParser("raw", { type: ["image/jpeg", "image/png", "image/webp"], limit: "3.5mb" });
 }

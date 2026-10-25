@@ -7,7 +7,8 @@ import type { PaymentProvider } from "../../generated/prisma/client.js";
  * stored attempt (reference, amount, currency, provider ids) and owns all state.
  */
 
-export type ProviderId = PaymentProvider;
+/** The only payment provider. (The database enum still lists SSLCOMMERZ for historical rows; nothing creates them.) */
+export type ProviderId = "BKASH";
 
 export type InitiateInput = {
   /** Our opaque reference; sent as the provider's transaction/invoice id. */
@@ -15,7 +16,7 @@ export type InitiateInput = {
   /** Whole taka, always derived on the server from the booking. */
   amountBdt: number;
   /** Where the provider sends the customer's browser afterwards (untrusted). */
-  urls: { callback: string; success: string; fail: string; cancel: string; ipn: string };
+  urls: { callback: string };
   customer: { name: string; email: string };
   productName: string;
 };

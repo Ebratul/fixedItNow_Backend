@@ -1,3 +1,4 @@
+import request from "supertest";
 import { addDays, localInstant, localParts } from "../src/bookings/time.js";
 import type { TestApp } from "./helpers.js";
 import { uniqueEmail } from "./helpers.js";
@@ -62,16 +63,43 @@ export const quoteBody = (extra: object = {}) => ({
   ...extra,
 });
 
-/** request -> accept -> start -> complete -> confirm: a COMPLETED booking. Leaves the fake clock inside the appointment. */
-export async function completedBooking(t: TestApp, cust: Person, worker: Worker, extra: object = {}) {
-  const start = at(t, 3, 10);
+/**
+ * The customer pays through the MOCK bKash (test/fake-providers.ts): start the payment, approve it "inside bKash",
+ * and let bKash's callback reach us. Our server then asks the (mock) provider and decides. The test app must have
+ * been created with TEST_ENV so the provider is configured. Returns the payment reference.
+ */
+export async function payBooking(t: TestApp, cust: Person, bookingId: string) {
+  const started = await cust.agent
+    .post(`${t.api}/bookings/${bookingId}/payments`)
+    .set("Idempotency-Key", `pay-${bookingId.slice(0, 8)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
+    .send({ provider: "BKASH" });
+  if (started.status !== 201) throw new Error(`payment start failed ${started.status} ${JSON.stringify(started.body)}`);
+  const reference = started.body.payment.reference as string;
+  const providerPaymentId = [...t.net.bkash.keys()].at(-1)!;
+  t.net.bkashApprove(providerPaymentId);
+  await request(t.app.getHttpServer())
+    .get(`${t.api}/payments/callbacks/bkash/${reference}`)
+    .query({ paymentID: providerPaymentId, status: "success", signature: "not-verified" });
+  return reference;
+}
+
+/** request -> accept -> start -> complete: a booking whose work is finished and whose payment is DUE. Leaves the fake clock inside the appointment. */
+export async function payableBooking(t: TestApp, cust: Person, worker: Worker, extra: object = {}, daysAhead = 3, hour = 10) {
+  const start = at(t, daysAhead, hour);
   const id = await confirmedBooking(t, cust, worker, start, extra);
   t.clock.set(new Date(start.getTime() - 10 * 60_000));
   const started = await worker.agent.post(`${t.api}/bookings/${id}/start`).send({});
   if (started.status !== 200) throw new Error(`start failed ${started.status}`);
   const done = await worker.agent.post(`${t.api}/bookings/${id}/complete`).send({});
   if (done.status !== 200) throw new Error(`complete failed ${done.status}`);
-  const confirmed = await cust.agent.post(`${t.api}/bookings/${id}/confirm-completion`).send({});
-  if (confirmed.status !== 200) throw new Error(`confirm failed ${confirmed.status}`);
+  return id;
+}
+
+/** payableBooking + a verified payment: a COMPLETED booking. */
+export async function completedBooking(t: TestApp, cust: Person, worker: Worker, extra: object = {}) {
+  const id = await payableBooking(t, cust, worker, extra);
+  await payBooking(t, cust, id);
+  const detail = await cust.agent.get(`${t.api}/bookings/${id}`);
+  if (detail.body.booking.status !== "COMPLETED") throw new Error(`payment did not complete the booking: ${detail.body.booking.status}`);
   return id;
 }

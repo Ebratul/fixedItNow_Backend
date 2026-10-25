@@ -1,7 +1,7 @@
 import { HttpClient, HttpUnreachableError, type HttpRequest, type HttpResponse } from "../src/payments/providers/http.js";
 
 /**
- * A deterministic stand-in for bKash and SSLCOMMERZ for AUTOMATED TESTS ONLY.
+ * A deterministic stand-in for bKash for AUTOMATED TESTS ONLY.
  *
  * It models just enough provider behaviour (sessions, customer approval,
  * execute-once, validation, refunds) to exercise OUR logic. It is NOT evidence
@@ -10,7 +10,6 @@ import { HttpClient, HttpUnreachableError, type HttpRequest, type HttpResponse }
  */
 
 export const BKASH_BASE = "https://tokenized.sandbox.bka.sh/v2/tokenized-checkout";
-export const SSL_HOST = "https://sandbox.sslcommerz.com";
 
 export const TEST_ENV = {
   BKASH_BASE_URL: BKASH_BASE,
@@ -19,11 +18,8 @@ export const TEST_ENV = {
   BKASH_USERNAME: "test-user",
   BKASH_PASSWORD: "test-pass-DO-NOT-LEAK",
   BKASH_REFUNDS_ENABLED: "true",
-  SSLCOMMERZ_STORE_ID: "teststore",
-  SSLCOMMERZ_STORE_PASSWORD: "test-store-pass-DO-NOT-LEAK",
-  SSLCOMMERZ_REFUNDS_ENABLED: "true",
 };
-export const SECRET_MARKERS = ["DO-NOT-LEAK", "test-app-key", "teststore"];
+export const SECRET_MARKERS = ["DO-NOT-LEAK", "test-app-key"];
 
 type BkashPayment = {
   paymentId: string;
@@ -36,33 +32,22 @@ type BkashPayment = {
   paidAmount?: string;
   refunds: { refundTrxId: string; amount: string; status: string }[];
 };
-type SslSession = { tran: string; amount: string; sessionKey: string };
-type SslTxn = { valId: string; tran: string; amount: string; currency: string; bankTranId: string; risk: string; status: string };
-type SslRefund = { ref: string; bank: string; amount: string; status: "processing" | "refunded" | "cancelled" };
 
 type Fault = "timeout" | "http500" | "http401" | "garbage";
 
 export class FakeProviderNet extends HttpClient {
   readonly calls: { method: string; url: string; query: Record<string, string>; form?: Record<string, string>; json?: unknown; headers?: Record<string, string> }[] = [];
   bkash = new Map<string, BkashPayment>();
-  ssl = new Map<string, SslSession>();
-  sslTxns = new Map<string, SslTxn>();
-  sslRefunds = new Map<string, SslRefund>();
   private faults = new Map<string, Fault[]>();
   private counter = 0;
   /** When set, the next bKash refund call is accepted but only completes after `completeBkashRefunds()`. */
   bkashRefundsComplete = true;
-  sslRefundsComplete = true;
 
   reset() {
     this.calls.length = 0;
     this.bkash.clear();
-    this.ssl.clear();
-    this.sslTxns.clear();
-    this.sslRefunds.clear();
     this.faults.clear();
     this.bkashRefundsComplete = true;
-    this.sslRefundsComplete = true;
   }
 
   /** Make the next calls whose route key starts with `route` fail like a real network would. */
@@ -81,21 +66,16 @@ export class FakeProviderNet extends HttpClient {
     p.approved = true;
     if (opts.amount) p.paidAmount = opts.amount;
   }
-  /** The customer completes payment on the SSLCOMMERZ page. Returns the val_id the callback would carry. */
-  sslPay(tran: string, opts: { amount?: string; currency?: string; risk?: string } = {}) {
-    const s = [...this.ssl.values()].find((x) => x.tran === tran)!;
-    const n = ++this.counter;
-    const txn: SslTxn = {
-      valId: `VAL${n}`,
-      tran,
-      amount: opts.amount ?? s.amount,
-      currency: opts.currency ?? "BDT",
-      bankTranId: `BANK${n}`,
-      risk: opts.risk ?? "0",
-      status: "VALID",
-    };
-    this.sslTxns.set(txn.valId, txn);
-    return txn;
+  /**
+   * bKash completed the payment (execute went through) but our side never saw the answer, e.g. the
+   * browser callback was lost. Only a query (reconcile / status poll) can discover it.
+   */
+  bkashCompleteSilently(paymentId: string) {
+    const p = this.bkash.get(paymentId)!;
+    p.approved = true;
+    p.executed = true;
+    p.status = "Completed";
+    p.trxId = `TRX${++this.counter}`;
   }
   completeBkashRefund(refundTrxId: string) {
     for (const p of this.bkash.values()) for (const r of p.refunds) if (r.refundTrxId === refundTrxId) r.status = "Completed";
@@ -118,7 +98,6 @@ export class FakeProviderNet extends HttpClient {
       }
     }
     if (route.startsWith(BKASH_BASE)) return this.bkashRoute(route.slice(BKASH_BASE.length), req);
-    if (route.startsWith(SSL_HOST)) return this.sslRoute(url.pathname, req, query);
     throw new Error(`FakeProviderNet: unexpected URL ${route}`);
   }
 
@@ -180,51 +159,5 @@ export class FakeProviderNet extends HttpClient {
       });
     }
     return { status: 404, body: { message: "no route" } };
-  }
-
-  private sslRoute(path: string, req: HttpRequest, q: Record<string, string>): HttpResponse {
-    if (path === "/gwprocess/v4/api.php") {
-      const f = req.form ?? {};
-      if (f.store_id !== TEST_ENV.SSLCOMMERZ_STORE_ID || f.store_passwd !== TEST_ENV.SSLCOMMERZ_STORE_PASSWORD) {
-        return this.ok({ status: "FAILED", failedreason: "Store Credential Error" });
-      }
-      const sessionKey = `SESS${++this.counter}`;
-      this.ssl.set(sessionKey, { tran: f.tran_id!, amount: f.total_amount!, sessionKey });
-      return this.ok({ status: "SUCCESS", sessionkey: sessionKey, GatewayPageURL: `https://sandbox.sslcommerz.com/gwprocess/v4/gw.php?Q=${sessionKey}` });
-    }
-    if (q.store_id !== TEST_ENV.SSLCOMMERZ_STORE_ID || q.store_passwd !== TEST_ENV.SSLCOMMERZ_STORE_PASSWORD) {
-      return this.ok({ APIConnect: "INVALID_REQUEST" });
-    }
-    if (path === "/validator/api/validationserverAPI.php") {
-      const t = this.sslTxns.get(q.val_id ?? "");
-      if (!t) return this.ok({ status: "INVALID_TRANSACTION", APIConnect: "DONE" });
-      return this.ok({
-        status: t.status, tran_id: t.tran, val_id: t.valId, amount: t.amount, store_amount: t.amount, currency: "BDT",
-        currency_type: t.currency, currency_amount: t.amount, bank_tran_id: t.bankTranId, risk_level: t.risk, risk_title: "Safe", APIConnect: "DONE",
-      });
-    }
-    if (path === "/validator/api/merchantTransIDvalidationAPI.php") {
-      if (q.tran_id) {
-        const found = [...this.sslTxns.values()].filter((t) => t.tran === q.tran_id);
-        const sessions = [...this.ssl.values()].filter((s) => s.tran === q.tran_id);
-        const element = found.length
-          ? found.map((t) => ({ status: t.status, val_id: t.valId, tran_id: t.tran, amount: t.amount, bank_tran_id: t.bankTranId }))
-          : sessions.map((s) => ({ status: "PENDING", val_id: "", tran_id: s.tran, amount: s.amount }));
-        return this.ok({ APIConnect: "DONE", no_of_trans_found: element.length, element });
-      }
-      if (q.bank_tran_id) {
-        const txn = [...this.sslTxns.values()].find((t) => t.bankTranId === q.bank_tran_id);
-        if (!txn) return this.ok({ APIConnect: "DONE", status: "failed", errorReason: "bad bank_tran_id" });
-        const ref = `SSLREF${++this.counter}`;
-        this.sslRefunds.set(ref, { ref, bank: q.bank_tran_id, amount: q.refund_amount!, status: this.sslRefundsComplete ? "refunded" : "processing" });
-        return this.ok({ APIConnect: "DONE", bank_tran_id: q.bank_tran_id, trans_id: txn.tran, refund_ref_id: ref, status: "success", errorReason: "" });
-      }
-      if (q.refund_ref_id) {
-        const r = this.sslRefunds.get(q.refund_ref_id);
-        if (!r) return this.ok({ APIConnect: "DONE", status: "cancelled", errorReason: "not found" });
-        return this.ok({ APIConnect: "DONE", refund_ref_id: r.ref, bank_tran_id: r.bank, status: r.status });
-      }
-    }
-    return { status: 404, body: undefined };
   }
 }

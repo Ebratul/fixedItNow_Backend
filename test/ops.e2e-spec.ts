@@ -127,7 +127,7 @@ describe("operations: request ids, health, error handling, admin status", () => 
       expect(res.body).toMatchObject({
         database: "ok",
         ai: { configured: false },
-        payments: { bkash: "not_configured", sslcommerz: "not_configured", refundsEnabled: { bkash: false, sslcommerz: false } },
+        payments: { bkash: "not_configured", refundsEnabled: { bkash: false } },
         mail: "console",
         queues: { paymentsRequiringReview: 0, paymentsUnresolvedOver30Minutes: 0, refundsAwaitingProvider: 0, refundsAwaitingDecision: 0, disputesOpen: 0, reportsOpen: 0 },
       });

@@ -34,17 +34,17 @@ describe("booking state machine", () => {
     const allowed = ACTIONS.filter((a) => ROLES.some((r) => canTransition(a, r, "DISPUTED"))).sort();
     expect(allowed).toEqual(["dispute_cancel", "dispute_mark_completed", "dispute_restore"]);
     // Customers and workers cannot complete or cancel a disputed booking themselves.
-    for (const action of ["confirm_completion", "complete", "cancel", "start"] as const) {
+    for (const action of ["payment_verified", "customer_finish", "arrive", "complete", "cancel", "start"] as const) {
       for (const role of ["CUSTOMER", "WORKER"] as const) expect(canTransition(action, role, "DISPUTED")).toBe(false);
     }
   });
 
   it("the customer cannot perform worker-only actions and vice versa", () => {
     for (const status of STATUSES) {
-      for (const action of ["accept", "decline", "quote", "withdraw_quote", "start", "complete"] as const) {
+      for (const action of ["accept", "decline", "quote", "withdraw_quote", "arrive", "start", "complete"] as const) {
         expect(canTransition(action, "CUSTOMER", status)).toBe(false);
       }
-      for (const action of ["accept_quote", "reject_quote", "confirm_completion"] as const) {
+      for (const action of ["accept_quote", "reject_quote"] as const) {
         expect(canTransition(action, "WORKER", status)).toBe(false);
       }
     }
@@ -58,13 +58,40 @@ describe("booking state machine", () => {
     expect(canTransition("dispute_mark_completed", "ADMIN", "DISPUTED")).toBe(true);
   });
 
-  it("the happy path is exactly REQUESTED -> CONFIRMED -> IN_PROGRESS -> COMPLETION_PENDING -> COMPLETED", () => {
+  it("the happy path is exactly REQUESTED -> CONFIRMED -> IN_PROGRESS -> COMPLETION_PENDING (payment due) -> COMPLETED (paid)", () => {
     expect(targetOf("accept")).toBe("CONFIRMED");
     expect(targetOf("start")).toBe("IN_PROGRESS");
     expect(targetOf("complete")).toBe("COMPLETION_PENDING");
-    expect(targetOf("confirm_completion")).toBe("COMPLETED");
+    expect(targetOf("payment_verified")).toBe("COMPLETED");
     expect(canTransition("start", "WORKER", "REQUESTED")).toBe(false); // cannot skip confirmation
-    expect(canTransition("confirm_completion", "CUSTOMER", "IN_PROGRESS")).toBe(false); // cannot skip the worker's report
+    expect(canTransition("payment_verified", "SYSTEM", "IN_PROGRESS")).toBe(false); // cannot skip the worker's report
+  });
+
+  it("payment, and only payment, completes a booking: the system role alone, only from COMPLETION_PENDING", () => {
+    for (const status of STATUSES) {
+      for (const role of ROLES) {
+        expect(canTransition("payment_verified", role, status), `${role}/${status}`).toBe(role === "SYSTEM" && status === "COMPLETION_PENDING");
+      }
+    }
+    // No participant or administrator action leads from the working states to COMPLETED.
+    const toCompleted = ACTIONS.filter((a) => TRANSITIONS[a].to === "COMPLETED").sort();
+    expect(toCompleted).toEqual(["dispute_mark_completed", "payment_verified"]);
+    expect(ACTIONS).not.toContain("confirm_completion");
+  });
+
+  it("the customer may declare the work finished from CONFIRMED or IN_PROGRESS only, which makes payment due and completes nothing", () => {
+    for (const status of STATUSES) {
+      for (const role of ROLES) expect(canTransition("customer_finish", role, status), `${role}/${status}`).toBe(role === "CUSTOMER" && (status === "CONFIRMED" || status === "IN_PROGRESS"));
+    }
+    expect(targetOf("customer_finish")).toBe("COMPLETION_PENDING");
+    expect(ACTIONS.filter((a) => TRANSITIONS[a].to === "COMPLETED").sort()).toEqual(["dispute_mark_completed", "payment_verified"]);
+  });
+
+  it("arrival is a worker-only milestone on a CONFIRMED booking and changes no status", () => {
+    for (const status of STATUSES) {
+      for (const role of ROLES) expect(canTransition("arrive", role, status), `${role}/${status}`).toBe(role === "WORKER" && status === "CONFIRMED");
+    }
+    expect(targetOf("arrive")).toBe("CONFIRMED");
   });
 
   it("RESTORE returns the previous status and requires it", () => {

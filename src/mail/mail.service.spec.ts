@@ -15,7 +15,7 @@ const env = (extra: Record<string, string> = {}) =>
 describe("MailService", () => {
   it("captures messages with the console transport", async () => {
     const mail = new MailService(env());
-    await mail.send({ kind: "verify-email", to: "a@example.com", subject: "s", text: "link" });
+    await mail.send({ kind: "verify-otp", to: "a@example.com", subject: "s", text: "code" });
     expect(mail.outbox).toHaveLength(1);
   });
 

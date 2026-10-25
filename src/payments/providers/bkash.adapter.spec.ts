@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isAllowedCheckoutUrl } from "../payments.service.js";
 import { loadEnv } from "../../config/env.js";
 import { HttpClient, HttpUnreachableError, type HttpRequest, type HttpResponse } from "./http.js";
 import { BkashAdapter } from "./bkash.adapter.js";
@@ -45,6 +46,21 @@ describe("BkashAdapter (mocked)", () => {
     expect(grants[0]).toMatchObject({ method: "POST", headers: { username: "user", password: "pass" }, json: { app_key: "key", app_secret: "secret" } });
     const query = http.calls.find((c) => c.url.endsWith("/query/payment"))!;
     expect(query.headers).toMatchObject({ Authorization: "Bearer TOKEN-1", "X-APP-Key": "key" });
+  });
+
+  it("accepts a realistic ~900 character id_token and a long checkout URL (the sandbox issues tokens this long)", async () => {
+    const longToken = "eyJ" + "a".repeat(877);
+    const longUrl = "https://sandbox.payment.bkash.com/?paymentId=P1&hash=" + "h".repeat(400);
+    const { http, bkash } = adapter({
+      "/auth/grant-token": () => ({ status: 200, body: { statusCode: "0000", id_token: longToken, expires_in: 3600 } }),
+      "/payment/create": () => ({ status: 200, body: { statusCode: "0000", paymentId: "P1", bkashURL: longUrl, amount: "500", merchantInvoiceNumber: "FIN1" } }),
+    });
+    expect(await bkash.initiate({ reference: "FIN1", amountBdt: 500, urls, customer: { name: "A", email: "a@example.com" }, productName: "x" })).toEqual({
+      kind: "ok",
+      providerPaymentId: "P1",
+      checkoutUrl: longUrl,
+    });
+    expect(http.calls.find((c) => c.url.endsWith("/payment/create"))!.headers).toMatchObject({ Authorization: `Bearer ${longToken}` });
   });
 
   it("shares ONE grant between concurrent calls (grant-token is limited to 2/hour)", async () => {
@@ -157,6 +173,27 @@ describe("BkashAdapter (mocked)", () => {
     });
     expect(await bkash.refundStatus({ ...input, providerRefundId: "R1" })).toEqual({ kind: "refunded", providerRefundId: "R1", amountPoisha: 20_000 });
     expect(await bkash.refundStatus({ ...input, providerRefundId: "R9" })).toEqual({ kind: "indeterminate", code: "REFUND_NOT_LISTED" });
+  });
+
+  it("never matches a refund by amount: without a refund id an earlier refund of the same amount must not count", async () => {
+    const { bkash } = adapter({
+      "/refund/payment/status": () => ({
+        status: 200,
+        body: { originalTrxId: "T1", refundTransactions: [{ refundTrxId: "R0", refundTransactionStatus: "Completed", refundAmount: "200.00" }] },
+      }),
+    });
+    const input = { providerPaymentId: "P1", providerTransactionId: "T1", refundReference: "RFD2", amountBdt: 200, reason: "x", paymentReference: "FIN1" };
+    expect(await bkash.refundStatus({ ...input, providerRefundId: null })).toEqual({ kind: "indeterminate", code: "MISSING_REFUND_ID" });
+  });
+
+  it("allows the bKash checkout host on its payment domain, and only bKash-owned https hosts", () => {
+    const allowed = adapter({}).bkash.checkoutHostSuffixes;
+    expect(isAllowedCheckoutUrl("https://sbpayment.bka.sh/pay?id=1", allowed)).toBe(true);
+    expect(isAllowedCheckoutUrl("https://sandbox.payment.bkash.com/redirect/tokenized/?paymentId=1", allowed)).toBe(true);
+    expect(isAllowedCheckoutUrl("https://evilbkash.com/pay", allowed)).toBe(false);
+    expect(isAllowedCheckoutUrl("https://bkash.com.evil.example/pay", allowed)).toBe(false);
+    expect(isAllowedCheckoutUrl("http://sandbox.payment.bkash.com/pay", allowed)).toBe(false);
+    expect(isAllowedCheckoutUrl("https://user:pw@sandbox.payment.bkash.com/pay", allowed)).toBe(false);
   });
 
   it("does not guess when a refund response is unusable", async () => {

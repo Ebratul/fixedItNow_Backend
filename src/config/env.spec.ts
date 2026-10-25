@@ -69,24 +69,19 @@ describe("loadEnv", () => {
     it("leaves providers unavailable (null) when unconfigured", () => {
       const env = loadEnv(base);
       expect(env.bkash).toBeNull();
-      expect(env.sslcommerz).toBeNull();
     });
 
     it("enables a provider only when ALL of its credentials are set", () => {
       expect(() => loadEnv({ ...base, BKASH_APP_KEY: "k" })).toThrow(/BKASH_BASE_URL/);
-      expect(() => loadEnv({ ...base, SSLCOMMERZ_STORE_ID: "id" })).toThrow(/SSLCOMMERZ_STORE_ID/);
       expect(loadEnv({ ...base, ...bkash }).bkash).toMatchObject({ isLive: false, refundsEnabled: false, authScheme: "bearer", baseUrl: "https://tokenized.sandbox.bka.sh/v2/tokenized-checkout" });
-      expect(loadEnv({ ...base, SSLCOMMERZ_STORE_ID: "id", SSLCOMMERZ_STORE_PASSWORD: "pw" }).sslcommerz).toMatchObject({ isLive: false, refundsEnabled: false });
     });
 
     it("keeps sandbox and live apart", () => {
       expect(() => loadEnv({ ...base, ...bkash, BKASH_IS_LIVE: "true" })).toThrow(/BKASH_IS_LIVE/);
       expect(() => loadEnv({ ...base, ...bkash, BKASH_BASE_URL: "https://tokenized.pay.bka.sh/v2/tokenized-checkout" })).toThrow(/not a sandbox URL/);
-      expect(() => loadEnv({ ...base, SSLCOMMERZ_STORE_ID: "id", SSLCOMMERZ_STORE_PASSWORD: "pw", SSLCOMMERZ_IS_LIVE: "true" })).toThrow(/SSLCOMMERZ_IS_LIVE/);
       expect(() => loadEnv({ ...prod, ...bkash, BKASH_IS_LIVE: "true" })).toThrow(/sandbox URL/);
       const live = loadEnv({ ...prod, BKASH_IS_LIVE: "true", BKASH_BASE_URL: "https://tokenized.pay.bka.sh/v2/tokenized-checkout", BKASH_APP_KEY: "k", BKASH_APP_SECRET: "s", BKASH_USERNAME: "u", BKASH_PASSWORD: "p" });
       expect(live.bkash?.isLive).toBe(true);
-      expect(loadEnv({ ...prod, SSLCOMMERZ_STORE_ID: "id", SSLCOMMERZ_STORE_PASSWORD: "pw", SSLCOMMERZ_IS_LIVE: "true" }).sslcommerz?.isLive).toBe(true);
     });
 
     it("only talks to bKash hosts over https", () => {

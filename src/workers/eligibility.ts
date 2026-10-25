@@ -9,6 +9,7 @@ import type { Prisma } from "../generated/prisma/client.js";
  *   - an authorised reviewer approved it (VERIFIED),
  *   - the owner chose to publish it (publishedAt set),
  *   - an admin has not suspended it (suspendedAt null),
+ *   - the owner's ACCOUNT is not suspended,
  *   - it has a public slug.
  * Every public query must spread this into its `where`; do not re-implement it.
  */
@@ -17,6 +18,7 @@ export const ELIGIBLE_WORKER = {
   verificationStatus: "VERIFIED",
   publishedAt: { not: null },
   suspendedAt: null,
+  user: { suspendedAt: null },
   slug: { not: null },
 } as const satisfies Prisma.WorkerProfileWhereInput;
 
@@ -25,6 +27,8 @@ type Listable = {
   verificationStatus: string;
   publishedAt: Date | null;
   suspendedAt: Date | null;
+  /** The owner's account suspension (omit when unknown/not suspended). */
+  userSuspendedAt?: Date | null;
   slug: string | null;
 };
 
@@ -35,6 +39,7 @@ export function isListable(profile: Listable): boolean {
     profile.verificationStatus === "VERIFIED" &&
     profile.publishedAt !== null &&
     profile.suspendedAt === null &&
+    (profile.userSuspendedAt ?? null) === null &&
     profile.slug !== null
   );
 }

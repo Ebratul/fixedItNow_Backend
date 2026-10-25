@@ -1,16 +1,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AiCallContext } from "../src/ai/ai-client.js";
-import { at, bookableWorker, completedBooking, confirmedBooking, customer, requestBooking } from "./booking-helpers.js";
+import { at, bookableWorker, completedBooking, confirmedBooking, customer, payableBooking, requestBooking } from "./booking-helpers.js";
 import { TEST_ENV } from "./fake-providers.js";
 import { createTestApp, uniqueEmail, type TestApp } from "./helpers.js";
-import { bkashCallback, latestBkashId, paymentStatus, raw, sslCallback, startPayment } from "./payment-helpers.js";
+import { bkashCallback, latestBkashId, paymentStatus, raw, startPayment } from "./payment-helpers.js";
 
 /**
  * Step 10: whole user journeys through the real HTTP API, real PostgreSQL, real
- * auth and authorization. External providers are MOCKS (bKash, SSLCOMMERZ, the
+ * auth and authorization. External providers are MOCKS (bKash, the
  * AI service): these prove OUR logic end to end, not the providers' behaviour.
- * Messaging does not exist yet (Step 7 was never built), so that step of each
- * journey is asserted as "not available" rather than skipped silently.
  */
 class StubAi {
   reply: unknown = {};
@@ -59,32 +57,45 @@ describe("end-to-end journeys", () => {
       const accepted = await cust.agent.post(`${t.api}/bookings/${id}/quotes/${quoteId}/accept`).send({ expectedTotalBdt: 1150 });
       expect(accepted.body.booking).toMatchObject({ status: "CONFIRMED", pricing: { agreedAmountBdt: 1150 } });
 
-      // 5. test payment (mock bKash): the customer approves inside bKash, the browser returns, the server verifies
+      // 5. booking-linked chat opens with the acceptance: both sides can talk, nobody else can read it
+      const stranger = await customer(t);
+      const hello = await cust.agent.post(`${t.api}/bookings/${id}/chat/messages`).send({ body: "Is 10 am still fine?", clientMessageId: "journey-msg-0001" });
+      expect(hello.status).toBe(201);
+      expect((await worker.agent.post(`${t.api}/bookings/${id}/chat/messages`).send({ body: "Yes, see you then.", clientMessageId: "journey-msg-0002" })).status).toBe(201);
+      expect((await cust.agent.get(`${t.api}/bookings/${id}/chat`)).body.messages.map((m: { body: string }) => m.body)).toEqual(["Is 10 am still fine?", "Yes, see you then."]);
+      expect((await stranger.agent.get(`${t.api}/bookings/${id}/chat`)).status).toBe(404);
+
+      // 6. payment is not possible yet: the work has not been reported finished
+      expect((await startPayment(t, cust, id, "BKASH")).body.code).toBe("BOOKING_NOT_PAYABLE");
+
+      // 7. the day of the job: arrive, start, finish. Finishing makes payment DUE; it does not pay or complete anything.
+      const start = at(t, 3, 10);
+      t.clock.set(new Date(start.getTime() - 10 * 60_000));
+      expect((await worker.agent.post(`${t.api}/bookings/${id}/arrive`).send({})).body.booking.arrivedAt).toBeTruthy();
+      await worker.agent.post(`${t.api}/bookings/${id}/start`).send({});
+      const finished = await worker.agent.post(`${t.api}/bookings/${id}/complete`).send({});
+      expect(finished.body.booking.status).toBe("COMPLETION_PENDING");
+      expect(finished.body.payment).toEqual({ state: "UNPAID" });
+      expect((await cust.agent.post(`${t.api}/bookings/${id}/review`).send({ rating: 5 })).status).toBe(422); // not reviewable before payment
+
+      // 8. test payment (mock bKash): the customer approves inside bKash, the browser returns, the server verifies
       const pay = await startPayment(t, cust, id, "BKASH");
       expect(pay.status).toBe(201);
       const ref = pay.body.payment.reference as string;
       const paymentId = latestBkashId(t);
       expect((await paymentStatus(t, cust, ref)).body.payment.status).toBe("INITIATED"); // nothing paid yet
+      expect((await cust.agent.get(`${t.api}/bookings/${id}`)).body.booking.status).toBe("COMPLETION_PENDING");
       t.net.bkashApprove(paymentId);
       await bkashCallback(t, ref, paymentId, "success");
       expect((await paymentStatus(t, cust, ref)).body.payment).toMatchObject({ status: "SUCCEEDED", amountBdt: 1150 });
 
-      // 6. booking status as both sides see it (payment details are the customer's alone)
+      // 9. booking status as both sides see it (payment details are the customer's alone): paid => completed
       const mine = await cust.agent.get(`${t.api}/bookings/${id}`);
       expect(mine.body.payment.state).toBe("PAID");
+      expect(mine.body.booking.status).toBe("COMPLETED");
       expect((await worker.agent.get(`${t.api}/bookings/${id}`)).body.payment).toEqual({ state: "PAID" });
 
-      // 7. messaging: NOT IMPLEMENTED (Step 7). Asserting the absence keeps the gap visible.
-      for (const path of [`/bookings/${id}/messages`, `/conversations`, `/notifications`]) {
-        expect((await cust.agent.get(`${t.api}${path}`)).status, path).toBe(404);
-      }
-
-      // 8. complete the job, review it, and see the real rating
-      const start = at(t, 3, 10);
-      t.clock.set(new Date(start.getTime() - 10 * 60_000));
-      await worker.agent.post(`${t.api}/bookings/${id}/start`).send({});
-      await worker.agent.post(`${t.api}/bookings/${id}/complete`).send({});
-      expect((await cust.agent.post(`${t.api}/bookings/${id}/confirm-completion`).send({})).body.booking.status).toBe("COMPLETED");
+      // 10. review it and see the real rating
       const review = await cust.agent.post(`${t.api}/bookings/${id}/review`).send({ rating: 5, comment: "Cold again, fair price." });
       expect(review.status).toBe(201);
       expect((await t.client().get(`${t.api}/workers/${worker.slug}`)).body.worker).toMatchObject({ rating: 5, reviewCount: 1 });
@@ -129,8 +140,8 @@ describe("end-to-end journeys", () => {
       expect((await w.agent.get(`${t.api}/bookings?role=customer`)).body.bookings).toHaveLength(0);
       expect((await w.agent.post(`${t.api}/bookings/${id}/quotes`).send({ laborBdt: 900, description: "Inspection, gas top-up and cleaning." })).status).toBe(200);
 
-      // messaging: not implemented (Step 7)
-      expect((await w.agent.get(`${t.api}/bookings/${id}/messages`)).status).toBe(404);
+      // a request that is not accepted yet has no conversation for anybody
+      expect((await w.agent.get(`${t.api}/bookings/${id}/chat`)).status).toBe(409);
 
       // a completed job + review shows up in the worker's legitimate rating summary (and only there)
       const asWorker = { ...w, profileId, slug } as Awaited<ReturnType<typeof bookableWorker>>;
@@ -218,7 +229,7 @@ describe("end-to-end journeys", () => {
     it("cannot bypass payment verification or duplicate transactions", async () => {
       const worker = await bookableWorker(t);
       const cust = await customer(t);
-      const id = await confirmedBooking(t, cust, worker, at(t, 3, 10));
+      const id = await payableBooking(t, cust, worker);
       const pay = await startPayment(t, cust, id, "BKASH");
       const ref = pay.body.payment.reference as string;
       const paymentId = latestBkashId(t);
@@ -229,9 +240,9 @@ describe("end-to-end journeys", () => {
       // a forged "success" redirect for a payment nobody approved never produces SUCCEEDED (the attempt is closed;
       // whether bKash would still capture such a payment later is an UNVERIFIED sandbox question, see docs/PAYMENTS.md)
       await bkashCallback(t, ref, paymentId, "success");
-      await sslCallback(t, "success", { tran_id: ref, status: "VALID", val_id: "forged", amount: "500.00", currency: "BDT" });
       expect((await paymentStatus(t, cust, ref)).body.payment.status).not.toBe("SUCCEEDED");
       expect(await t.prisma.payment.count({ where: { bookingId: id, status: "SUCCEEDED" } })).toBe(0);
+      expect((await t.prisma.booking.findUniqueOrThrow({ where: { id } })).status).toBe("COMPLETION_PENDING"); // a forged redirect completes nothing
       // a fresh attempt, really approved, settles exactly once even when the callback is replayed in parallel
       const second = await startPayment(t, cust, id, "BKASH");
       expect(second.status).toBe(201);
@@ -242,6 +253,8 @@ describe("end-to-end journeys", () => {
       expect((await paymentStatus(t, cust, ref2)).body.payment.status).toBe("SUCCEEDED");
       expect(await t.prisma.payment.count({ where: { bookingId: id, status: "SUCCEEDED" } })).toBe(1);
       expect(await t.prisma.paymentEvent.count({ where: { type: "payment.succeeded" } })).toBe(1);
+      expect((await t.prisma.booking.findUniqueOrThrow({ where: { id } })).status).toBe("COMPLETED");
+      expect(await t.prisma.bookingEvent.count({ where: { bookingId: id, type: "booking.completed" } })).toBe(1);
     });
 
     it("has no file upload or private-document routes to attack", async () => {

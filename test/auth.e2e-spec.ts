@@ -15,7 +15,7 @@ describe("authentication", () => {
     t.client().post(`${t.api}/auth/sign-in/email`).send({ email, password });
 
   describe("registration", () => {
-    it("registers, stores only a hash, and emails a verification link", async () => {
+    it("registers, stores only a hash, and emails a verification CODE (no link)", async () => {
       const email = uniqueEmail();
       const res = await signUp(email);
       expect(res.status).toBe(200);
@@ -28,7 +28,8 @@ describe("authentication", () => {
       const account = await t.prisma.account.findFirstOrThrow({ where: { userId: user.id } });
       expect(account.password).toBeTruthy();
       expect(account.password).not.toContain(PASSWORD);
-      expect(t.lastLink("verify-email", email)).toContain("/api/v1/auth/verify-email?token=");
+      expect(t.lastOtp(email)).toMatch(/^\d{6}$/);
+      expect(t.mail.outbox.some((m) => m.to === email && /https?:\/\//.test(m.text))).toBe(false);
     });
 
     it.each([
@@ -103,25 +104,6 @@ describe("authentication", () => {
       expect(cookie).toMatch(/better-auth\.session_token=/);
       expect(cookie).toMatch(/HttpOnly/i);
       expect(cookie).toMatch(/SameSite=Lax/i);
-    });
-
-    it("resends a verification link on request, answering the same for unknown emails", async () => {
-      const email = uniqueEmail();
-      await signUp(email);
-      t.mail.outbox.length = 0;
-      const known = await t.client().post(`${t.api}/auth/send-verification-email`).send({ email, callbackURL: "/verify-email" });
-      const unknown = await t.client().post(`${t.api}/auth/send-verification-email`).send({ email: uniqueEmail("ghost"), callbackURL: "/verify-email" });
-      expect(known.status).toBe(unknown.status);
-      expect(known.body).toEqual(unknown.body);
-      expect(t.mail.outbox.filter((m) => m.kind === "verify-email")).toHaveLength(1);
-      expect(t.lastLink("verify-email", email)).toContain("callbackURL=%2Fverify-email");
-    });
-
-    it("rejects an unknown or tampered email-verification token", async () => {
-      const res = await t.client().get(`${t.api}/auth/verify-email?token=garbage&callbackURL=%2Fverify-email`);
-      expect([302, 400, 401]).toContain(res.status);
-      expect(res.headers["set-cookie"]).toBeUndefined();
-      if (res.status === 302) expect(res.headers.location).toContain("error=");
     });
   });
 
@@ -216,16 +198,6 @@ describe("authentication", () => {
         expect(res.status).toBe(403);
       },
     );
-
-    it("does not follow a tampered callbackURL on a verification link", async () => {
-      const email = uniqueEmail();
-      await signUp(email);
-      const link = new URL("http://x" + t.lastLink("verify-email", email)!);
-      link.searchParams.set("callbackURL", "https://evil.example/steal");
-      const res = await t.client().get(link.pathname + link.search);
-      expect(res.headers.location ?? "").not.toContain("evil.example");
-      expect(res.status).toBe(403);
-    });
 
     it("refuses a password-reset redirectTo on a foreign origin", async () => {
       const email = uniqueEmail();

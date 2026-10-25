@@ -1,7 +1,8 @@
+import { DEFAULT_ROLES } from "../src/admin/permissions.js";
 import { createScriptClient } from "../scripts/db.js";
 
 /**
- * Seeds reference data only (service categories). Idempotent. Contains no users,
+ * Seeds reference data only (service categories, starting admin roles). Idempotent. Contains no users,
  * no workers, and no credentials.
  */
 const CATEGORIES = [
@@ -27,6 +28,16 @@ try {
     });
   }
   console.log(`Seeded ${CATEGORIES.length} service categories.`);
+
+  // Starting admin roles. Created only when missing: edits made in the admin panel are never overwritten.
+  let created = 0;
+  for (const role of DEFAULT_ROLES) {
+    const exists = await prisma.adminRole.findUnique({ where: { key: role.key }, select: { id: true } });
+    if (exists) continue;
+    await prisma.adminRole.create({ data: { key: role.key, name: role.name, description: role.description, permissions: role.permissions } });
+    created += 1;
+  }
+  console.log(`Admin roles: ${created} created, ${DEFAULT_ROLES.length - created} already present.`);
 } finally {
   await prisma.$disconnect();
 }

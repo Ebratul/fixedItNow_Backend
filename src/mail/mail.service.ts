@@ -7,7 +7,7 @@ export type MailMessage = {
   subject: string;
   text: string;
   /** Short label for logs. Never log the body: it contains one-time links. */
-  kind: "verify-email" | "reset-password" | "account-notice";
+  kind: "verify-otp" | "reset-password" | "account-notice";
 };
 
 /**

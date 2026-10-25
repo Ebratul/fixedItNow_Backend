@@ -9,6 +9,7 @@ import {
 import { Reflector } from "@nestjs/core";
 import { fromNodeHeaders } from "better-auth/node";
 import type { Request } from "express";
+import { expandPermissions } from "../admin/permissions.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { AUTH, type Auth } from "./auth.factory.js";
 import { IS_PUBLIC } from "./decorators.js";
@@ -49,9 +50,14 @@ export class AuthGuard implements CanActivate {
 
     const user = await this.prisma.user.findUnique({
       where: { id: session.user.id },
-      select: { role: true },
+      select: { role: true, suspendedAt: true, adminRole: { select: { permissions: true } } },
     });
     if (!user) throw new UnauthorizedException("Authentication required");
+    // Restricted by an administrator. Their sessions are also revoked when this is set, so this
+    // only matters for a session created in the same instant.
+    if (user.suspendedAt) {
+      throw new ForbiddenException({ statusCode: 403, error: "Forbidden", code: "ACCOUNT_SUSPENDED", message: "This account has been suspended. Please contact support." });
+    }
 
     req.auth = {
       userId: session.user.id,
@@ -60,6 +66,7 @@ export class AuthGuard implements CanActivate {
       emailVerified: session.user.emailVerified,
       sessionId: session.session.id,
       role: user.role,
+      permissions: user.role === "ADMIN" && user.adminRole ? [...expandPermissions(user.adminRole.permissions)] : [],
     };
     return true;
   }

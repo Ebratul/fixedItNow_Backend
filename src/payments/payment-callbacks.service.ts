@@ -4,11 +4,10 @@ import { PrismaService } from "../prisma/prisma.service.js";
 import { PAID_PAYMENT_STATUSES } from "./payment.config.js";
 import { recordEvent, SYSTEM } from "./payment.db.js";
 import { PaymentsService } from "./payments.service.js";
-import { safeCode, str, type PaymentProviderAdapter, type Verification } from "./providers/payment-provider.js";
+import { str, type PaymentProviderAdapter, type Verification } from "./providers/payment-provider.js";
 import { PaymentProviders } from "./providers/providers.service.js";
 
 export const REFERENCE_PATTERN = /^FIN[0-9A-F]{24}$/;
-export type SslKind = "success" | "fail" | "cancel" | "ipn";
 
 /**
  * Handles what providers (and customers' browsers) send to our public callback
@@ -29,7 +28,7 @@ export class PaymentCallbacksService {
     private readonly providers: PaymentProviders,
   ) {}
 
-  private async find(reference: string, provider: "BKASH" | "SSLCOMMERZ"): Promise<Payment | null> {
+  private async find(reference: string, provider: "BKASH"): Promise<Payment | null> {
     if (!REFERENCE_PATTERN.test(reference)) return null;
     return this.prisma.payment.findFirst({ where: { reference, provider } });
   }
@@ -96,51 +95,6 @@ export class PaymentCallbacksService {
 
     await this.verifyAndApply(p, adapter, "bkash_callback", claimed === "cancel" ? "cancelled" : claimed === "failure" ? "failed" : undefined);
     return p.reference;
-  }
-
-  // ================================================================ SSLCOMMERZ
-
-  /** Browser POST (success/fail/cancel) or server-to-server IPN. All fields are untrusted. */
-  async sslcommerz(kind: SslKind, form: Record<string, unknown>): Promise<string | null> {
-    const tranId = str(form.tran_id);
-    const p = tranId ? await this.find(tranId, "SSLCOMMERZ") : null;
-    if (!p) return null;
-    const adapter = this.providers.get("SSLCOMMERZ");
-
-    const claimedStatus = safeCode(form.status, "NONE");
-    const claim = this.sslClaim(kind, claimedStatus);
-    await this.recordCallback(p, `cb:${p.id}:${kind}:${claimedStatus}`, { provider: "SSLCOMMERZ", kind, claimedStatus });
-    if (this.isSettled(p) || !adapter) return p.reference;
-
-    if (claim === null) await this.payments.markCallbackReceived(p.id, SYSTEM, `sslcommerz_${kind}`);
-    const valId = str(form.val_id);
-
-    let v = await this.safely("ssl.verify", () => adapter.verify(this.ctx(p, valId ?? p.providerValidationId)));
-    const foreign = v.kind === "completed" && v.reference !== p.reference;
-    if (valId && (foreign || v.kind === "not_completed")) {
-      // The val_id in the request belongs to another transaction or is unknown: do not
-      // trust it. Fall back to looking the transaction up by OUR tran_id.
-      if (foreign) {
-        await this.recordCallback(p, `cbrej:${p.id}:foreign_val`, { rejected: "FOREIGN_VALIDATION_ID" }, "payment.callback_rejected");
-      }
-      v = await this.safely("ssl.lookup", () => adapter.verify(this.ctx(p, null)));
-    }
-    if (v.kind === "indeterminate") {
-      await this.payments.markCallbackReceived(p.id, SYSTEM, `sslcommerz_${kind}`);
-      return p.reference; // stays PROCESSING; reconciliation resolves it
-    }
-    await this.payments.applyVerification(p.id, v, { actor: SYSTEM, source: `sslcommerz_${kind}`, claim: claim ?? undefined });
-    return p.reference;
-  }
-
-  private sslClaim(kind: SslKind, status: string): "failed" | "cancelled" | null {
-    if (kind === "fail") return "failed";
-    if (kind === "cancel") return "cancelled";
-    if (kind === "ipn") {
-      if (status === "CANCELLED") return "cancelled";
-      if (status === "FAILED" || status === "EXPIRED" || status === "UNATTEMPTED") return "failed";
-    }
-    return null; // success (or an IPN that claims success): the Validation API decides
   }
 
   // ================================================================ shared

@@ -286,4 +286,28 @@ describe("worker availability", () => {
     expect(ALL_WEEK).toHaveLength(7);
     expect((await w.agent.get(`${t.api}/me/availability`)).body.rules).toHaveLength(7);
   });
+
+  describe("hostile input", () => {
+    it("an out-of-range `from` date is a 400 validation error, never a 500 (public endpoint)", async () => {
+      const w = await bookableWorker(t);
+      const slug = (await t.prisma.workerProfile.findUniqueOrThrow({ where: { id: w.profileId } })).slug!;
+      for (const from of ["9999-12-31", "0001-01-01", "2101-01-01"]) {
+        const res = await t.client().get(`${t.api}/workers/${slug}/availability?from=${from}`);
+        expect(res.status, from).toBe(400);
+      }
+      expect((await t.client().get(`${t.api}/workers/${slug}/availability?from=2100-12-31`)).status).toBe(200);
+    });
+
+    it("a NUL or bidi-override character in free text is rejected with 400, not stored or a 500", async () => {
+      const w = await bookableWorker(t);
+      const c = await customer(t);
+      const start = at(t, 3, 10);
+      for (const bad of ["The fan is noisy\u0000 and slow.", "The fan is noisy \u202e and slow."]) {
+        const res = await requestBooking(t, c, w, start, { description: bad });
+        expect(res.status, JSON.stringify(res.body)).toBe(400);
+      }
+      const name = await c.agent.put(`${t.api}/me/customer-profile`).send({ displayName: "Ali\u0000Khan" });
+      expect(name.status).toBe(400);
+    });
+  });
 });

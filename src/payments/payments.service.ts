@@ -1,9 +1,11 @@
 import { BadGatewayException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import type { AuthContext } from "../auth/auth.types.js";
 import { bookingNotFound, conflict, isUniqueViolation, unprocessable } from "../bookings/domain-errors.js";
+import { BookingCore } from "../bookings/booking-core.service.js";
 import { Clock } from "../bookings/clock.js";
 import { ENV, type Env } from "../config/env.js";
-import type { Payment, PaymentReviewReason, PaymentStatus } from "../generated/prisma/client.js";
+import type { Payment, PaymentReviewReason, PaymentStatus, Prisma } from "../generated/prisma/client.js";
+import { NotificationsService, type NewNotification } from "../notifications/notifications.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import {
   CURRENCY,
@@ -17,6 +19,7 @@ import {
   REVERIFY_MIN_SECONDS,
 } from "./payment.config.js";
 import { changeStatus, lockBooking, lockPayment, newReference, recordEvent, SYSTEM, type Actor, type Tx } from "./payment.db.js";
+import type { AdminPaymentsQuery } from "./payment.schemas.js";
 import { presentPayment } from "./payment.view.js";
 import type { PaymentProviderAdapter, ProviderId, Verification, VerifyContext } from "./providers/payment-provider.js";
 import { PaymentProviders } from "./providers/providers.service.js";
@@ -53,6 +56,8 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly providers: PaymentProviders,
     private readonly clock: Clock,
+    private readonly core: BookingCore,
+    private readonly notifications: NotificationsService,
     @Inject(ENV) private readonly env: Env,
   ) {}
 
@@ -234,14 +239,7 @@ export class PaymentsService {
   }
 
   private urlsFor(adapter: PaymentProviderAdapter, reference: string) {
-    const base = adapter.id === "BKASH" ? `callbacks/bkash/${reference}` : "callbacks/sslcommerz";
-    return {
-      callback: this.publicApi(base),
-      success: this.publicApi("callbacks/sslcommerz/success"),
-      fail: this.publicApi("callbacks/sslcommerz/fail"),
-      cancel: this.publicApi("callbacks/sslcommerz/cancel"),
-      ipn: this.publicApi("ipn/sslcommerz"),
-    };
+    return { callback: this.publicApi(`callbacks/${adapter.id.toLowerCase()}/${reference}`) };
   }
 
   // ================================================================ read (customer)
@@ -398,7 +396,9 @@ export class PaymentsService {
    */
   async applyVerification(paymentId: string, v: Verification, opts: ApplyOptions): Promise<void> {
     const now = this.clock.now();
+    const notices: NewNotification[] = [];
     await this.prisma.$transaction(async (tx) => {
+      notices.length = 0; // the callback runs again if the transaction is retried
       const head = await tx.payment.findUnique({ where: { id: paymentId }, select: { bookingId: true } });
       if (!head) return;
       await lockBooking(tx, head.bookingId);
@@ -416,18 +416,31 @@ export class PaymentsService {
       if (v.kind === "indeterminate") return; // unknown stays unknown
 
       if (v.kind === "not_completed") {
-        await this.applyNotCompleted(tx, p, v.state, opts);
+        await this.applyNotCompleted(tx, p, v.state, opts, notices);
         return;
       }
-      await this.applyCompleted(tx, p, v, opts.actor, now);
+      await this.applyCompleted(tx, p, v, opts.actor, now, notices);
     });
+    // Committed. Telling people about it is best effort and can never undo the payment or the booking.
+    await this.notifications.notifyBestEffort(notices);
   }
 
-  private async applyNotCompleted(tx: Tx, p: Payment, state: "pending" | "failed" | "cancelled" | "unknown", opts: ApplyOptions) {
+  private async applyNotCompleted(tx: Tx, p: Payment, state: "pending" | "failed" | "cancelled" | "unknown", opts: ApplyOptions, notices: NewNotification[]) {
     if (!isOpen(p.status)) return; // terminal states are never changed by a non-payment report
     const actor = opts.actor;
-    const fail = (to: "FAILED" | "CANCELLED" | "EXPIRED", code: string) =>
-      changeStatus(tx, p, to, actor, { type: `payment.${to.toLowerCase()}`, metadata: { source: opts.source, code } }, { failureCode: code });
+    const fail = async (to: "FAILED" | "CANCELLED" | "EXPIRED", code: string) => {
+      await changeStatus(tx, p, to, actor, { type: `payment.${to.toLowerCase()}`, metadata: { source: opts.source, code } }, { failureCode: code });
+      // A failed attempt needs the customer to act (retry); a cancelled or abandoned one was their own choice.
+      if (to === "FAILED") {
+        notices.push({
+          userId: p.customerId,
+          type: "payment.failed",
+          title: "Your payment did not go through",
+          body: "The payment was not completed and nothing was charged to this booking. You can try again from the booking page.",
+          link: `/bookings/${p.bookingId}`,
+        });
+      }
+    };
 
     const outcome = state === "failed" || state === "cancelled" ? state : opts.claim;
     if (outcome === "cancelled") return fail("CANCELLED", "CANCELLED_BY_CUSTOMER");
@@ -444,6 +457,7 @@ export class PaymentsService {
     v: Extract<Verification, { kind: "completed" }>,
     actor: Actor,
     now: Date,
+    notices: NewNotification[],
   ) {
     // Already settled: replays and late duplicates change nothing.
     if (isPaid(p.status) || p.status === "REQUIRES_REVIEW") {
@@ -472,6 +486,13 @@ export class PaymentsService {
     if (p.status === "PENDING") reason ??= "REFERENCE_MISMATCH"; // paid at the provider but we never recorded a session
 
     const park = async (why: PaymentReviewReason) => {
+      notices.push({
+        userId: p.customerId,
+        type: "payment.requires_review",
+        title: "Your payment is being checked",
+        body: "We received a payment report for your booking that needs a manual check. Please do not pay again; the booking stays unpaid until it is resolved.",
+        link: `/bookings/${p.bookingId}`,
+      });
       await changeStatus(tx, p, "REQUIRES_REVIEW", actor, {
         type: "payment.requires_review",
         metadata: { reason: why, reportedAmountPoisha: v.amountPoisha, reportedCurrency: v.currency },
@@ -496,7 +517,10 @@ export class PaymentsService {
     if (duplicate) return park("DUPLICATE_PAYMENT");
 
     // Verified: amount, currency, reference and provider ids all match.
-    const booking = await tx.booking.findUniqueOrThrow({ where: { id: p.bookingId }, select: { status: true } });
+    const booking = await tx.booking.findUniqueOrThrow({
+      where: { id: p.bookingId },
+      select: { id: true, status: true, category: { select: { name: true } }, workerProfile: { select: { userId: true, displayName: true } } },
+    });
     const ineligible = !PAYABLE_BOOKING_STATUSES.includes(booking.status);
     await changeStatus(tx, p, "SUCCEEDED", actor, {
       type: "payment.succeeded",
@@ -509,8 +533,6 @@ export class PaymentsService {
       failureCode: null,
       reviewReason: ineligible ? "BOOKING_INELIGIBLE" : null,
     });
-    // The booking's own lifecycle is NOT changed by a payment: a late payment never reactivates
-    // a cancelled or disputed booking. We only add a history line for its participants.
     await tx.bookingEvent.create({
       data: {
         bookingId: p.bookingId,
@@ -519,6 +541,31 @@ export class PaymentsService {
         type: "payment.verified",
         metadata: { provider: p.provider, bookingStatus: booking.status },
       },
+    });
+    // A verified payment is the ONLY thing that completes a booking whose work is finished. We hold the booking
+    // lock, so the status cannot change under us. Any other status (a dispute, a cancellation) is left exactly as
+    // it is: a late payment never reactivates a cancelled or disputed booking, and a booking an administrator
+    // already completed stays completed. Those payments are flagged BOOKING_INELIGIBLE or simply recorded.
+    if (booking.status === "COMPLETION_PENDING") {
+      await this.core.transition(tx, { id: booking.id, status: booking.status }, "payment_verified", SYSTEM, {
+        data: { completedAt: now },
+        eventType: "booking.completed",
+        metadata: { paymentReference: p.reference, provider: p.provider },
+      });
+    }
+    notices.push({
+      userId: p.customerId,
+      type: "payment.succeeded",
+      title: "Payment received",
+      body: `Your ৳${p.amountBdt} payment for ${booking.category.name} was verified.${booking.status === "COMPLETION_PENDING" ? " The booking is complete and you can now leave a review." : ""}`,
+      link: `/bookings/${p.bookingId}`,
+    });
+    notices.push({
+      userId: booking.workerProfile.userId,
+      type: "payment.succeeded",
+      title: "The customer's payment was verified",
+      body: `Payment for the ${booking.category.name} booking was verified${booking.status === "COMPLETION_PENDING" ? " and the booking is complete" : ""}.`,
+      link: `/bookings/${p.bookingId}`,
     });
   }
 
@@ -567,13 +614,19 @@ export class PaymentsService {
     }
   }
 
-  async adminList(status: PaymentStatus | "NEEDS_ATTENTION" | undefined, page: number, pageSize: number) {
-    const where =
-      status === "NEEDS_ATTENTION"
+  async adminList(q: AdminPaymentsQuery) {
+    const { status, page, pageSize } = q;
+    const term = q.q?.trim();
+    const where: Prisma.PaymentWhereInput = {
+      ...(status === "NEEDS_ATTENTION"
         ? { OR: [{ status: "REQUIRES_REVIEW" as const }, { reviewReason: "BOOKING_INELIGIBLE" as const }] }
         : status
           ? { status }
-          : {};
+          : {}),
+      ...(q.provider && { provider: q.provider }),
+      ...((q.from || q.to) && { createdAt: { ...(q.from && { gte: q.from }), ...(q.to && { lt: q.to }) } }),
+      ...(term && { AND: [{ OR: [{ reference: { contains: term, mode: "insensitive" as const } }, ...(/^[0-9a-f-]{36}$/i.test(term) ? [{ bookingId: term }] : [])] }] }),
+    };
     const [total, rows] = await this.prisma.$transaction([
       this.prisma.payment.count({ where }),
       this.prisma.payment.findMany({
@@ -581,10 +634,11 @@ export class PaymentsService {
         orderBy: [{ createdAt: "desc" }, { id: "asc" }],
         skip: (page - 1) * pageSize,
         take: pageSize,
+        include: { customer: { select: { id: true, name: true } } },
       }),
     ]);
     return {
-      payments: rows.map((p) => ({ ...presentPayment(p), reviewReason: p.reviewReason, verificationAttempts: p.verificationAttempts, lastVerifiedAt: p.lastVerifiedAt })),
+      payments: rows.map(({ customer, ...p }) => ({ ...presentPayment(p), customer, reviewReason: p.reviewReason, verificationAttempts: p.verificationAttempts, lastVerifiedAt: p.lastVerifiedAt })),
       page,
       pageSize,
       total,

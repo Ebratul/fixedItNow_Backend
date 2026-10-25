@@ -6,7 +6,8 @@ import { authorSelect, publicName } from "../common/user-text.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { ELIGIBLE_WORKER } from "../workers/eligibility.js";
 import { isValidSlug } from "../workers/slug.js";
-import { COUNTED_REVIEW, ratingDistribution, ratingSummaries, NO_REVIEWS } from "./ratings.js";
+import { NotificationsService } from "../notifications/notifications.service.js";
+import { COUNTED_REVIEW, isReviewable, ratingDistribution, ratingSummaries, NO_REVIEWS } from "./ratings.js";
 import { REVIEW_EDIT_WINDOW_DAYS, type CreateReview, type UpdateReview } from "./reviews.schemas.js";
 
 /** Review as its own author sees it. */
@@ -31,26 +32,30 @@ export class ReviewsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly clock: Clock,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
    * Eligibility is decided HERE, from the database, never from the request:
-   * the caller must be the booking's customer and the booking must be COMPLETED.
-   * A booking that is not yours is indistinguishable from one that does not
+   * the caller must be the booking's customer, the booking must be COMPLETED, and a payment for it must have
+   * been VERIFIED by the provider (a redirect or a customer click never counts). A booking that is not yours is indistinguishable from one that does not
    * exist (404). One review per booking is enforced by a UNIQUE constraint, so
    * parallel submissions create exactly one row.
    */
   async create(auth: AuthContext, bookingId: string, input: CreateReview) {
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
-      select: { id: true, customerId: true, status: true, workerProfileId: true, workerProfile: { select: { userId: true } } },
+      select: { id: true, customerId: true, status: true, workerProfileId: true, workerProfile: { select: { userId: true } }, category: { select: { name: true } } },
     });
     if (!booking || booking.customerId !== auth.userId) throw bookingNotFound();
     if (booking.workerProfile.userId === auth.userId) {
       throw new ForbiddenException("You cannot review your own service");
     }
     if (booking.status !== "COMPLETED") {
-      throw unprocessable("BOOKING_NOT_REVIEWABLE", "You can review a booking once the job is completed");
+      throw unprocessable("BOOKING_NOT_REVIEWABLE", "You can review a booking once the job is completed and paid");
+    }
+    if (!(await isReviewable(this.prisma, booking))) {
+      throw unprocessable("PAYMENT_NOT_VERIFIED", "You can review this booking once its payment has been verified");
     }
     const now = this.clock.now();
     try {
@@ -65,6 +70,15 @@ export class ReviewsService {
           comment: input.comment ?? null,
         },
       });
+      await this.notifications.notifyBestEffort([
+        {
+          userId: booking.workerProfile.userId,
+          type: "review.received",
+          title: "You received a review",
+          body: `A customer rated your ${booking.category.name} job ${input.rating} out of 5.`,
+          link: `/bookings/${booking.id}`,
+        },
+      ]);
       return { review: present(row, now) };
     } catch (error) {
       if (isUniqueViolation(error)) throw conflict("REVIEW_EXISTS", "You have already reviewed this booking");

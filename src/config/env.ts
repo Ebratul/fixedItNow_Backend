@@ -65,10 +65,6 @@ const schema = z
     // and (in curl samples) as the raw id_token. Unverified: confirm in the sandbox.
     BKASH_AUTH_SCHEME: z.enum(["bearer", "raw"]).default("bearer"),
     BKASH_REFUNDS_ENABLED: boolean.default(false),
-    SSLCOMMERZ_STORE_ID: optionalString,
-    SSLCOMMERZ_STORE_PASSWORD: optionalString,
-    SSLCOMMERZ_IS_LIVE: boolean.default(false),
-    SSLCOMMERZ_REFUNDS_ENABLED: boolean.default(false),
 
     // AI assistant (Step 8). The Python service lives in rag_agent/. The assistant
     // is ENABLED only when all three are set; with none set /ai/chat answers 503
@@ -78,6 +74,15 @@ const schema = z
     AI_SERVICE_URL: optionalString,
     AI_SERVICE_TOKEN: optionalString,
     APP_API_SERVICE_TOKEN: optionalString,
+    // Private identity documents (admin panel). Base64 of exactly 32 random bytes (openssl rand -base64 32).
+    // Without it, document upload is unavailable (503) and nothing is stored unencrypted.
+    DOCUMENT_ENCRYPTION_KEY: optionalString,
+    // Label stored with each document so a future key rotation can tell which key sealed it.
+    DOCUMENT_ENCRYPTION_KEY_ID: z.string().regex(/^[A-Za-z0-9_-]{1,20}$/).default("k1"),
+    // Bootstrap administrator. When both are set, the API creates (or updates) this account at startup:
+    // verified email, super_admin role, password = ADMIN_PASSWORD. It signs in on /admin (email + password).
+    ADMIN_EMAIL: optionalString,
+    ADMIN_PASSWORD: z.string().optional().transform((value) => (value ? value : undefined)),
     AI_REQUEST_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(30),
     AI_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(600).default(10),
   })
@@ -121,8 +126,17 @@ const schema = z
         issue("BKASH_IS_LIVE", "The URL is not a sandbox URL: set BKASH_IS_LIVE=true if this is the live endpoint");
       }
     }
-    if (Boolean(env.SSLCOMMERZ_STORE_ID) !== Boolean(env.SSLCOMMERZ_STORE_PASSWORD)) {
-      issue("SSLCOMMERZ_STORE_ID", "Set both SSLCOMMERZ_STORE_ID and SSLCOMMERZ_STORE_PASSWORD, or neither");
+    if (Boolean(env.ADMIN_EMAIL) !== Boolean(env.ADMIN_PASSWORD)) {
+      issue("ADMIN_EMAIL", "Set both ADMIN_EMAIL and ADMIN_PASSWORD, or neither");
+    }
+    if (env.ADMIN_EMAIL && !z.email().safeParse(env.ADMIN_EMAIL).success) {
+      issue("ADMIN_EMAIL", "Must be a valid email address");
+    }
+    if (env.ADMIN_PASSWORD) {
+      if (env.ADMIN_PASSWORD.length > 128) issue("ADMIN_PASSWORD", "Must be at most 128 characters");
+      if (env.NODE_ENV === "production" && env.ADMIN_PASSWORD.length < 12) {
+        issue("ADMIN_PASSWORD", "Must be at least 12 characters in production");
+      }
     }
     const aiVars = [env.AI_SERVICE_URL, env.AI_SERVICE_TOKEN, env.APP_API_SERVICE_TOKEN];
     if (aiVars.some(Boolean) && !aiVars.every(Boolean)) {
@@ -137,6 +151,9 @@ const schema = z
         issue("AI_SERVICE_URL", "Must be a valid URL");
       }
     }
+    if (env.DOCUMENT_ENCRYPTION_KEY && Buffer.from(env.DOCUMENT_ENCRYPTION_KEY, "base64").length !== 32) {
+      issue("DOCUMENT_ENCRYPTION_KEY", "Must be the base64 encoding of exactly 32 bytes (try: openssl rand -base64 32)");
+    }
     for (const name of ["AI_SERVICE_TOKEN", "APP_API_SERVICE_TOKEN"] as const) {
       const token = env[name];
       if (token && token.length < 32) issue(name, `${name} must be at least 32 characters`);
@@ -147,9 +164,6 @@ const schema = z
     // Live credentials are only accepted by a production deployment.
     if (env.NODE_ENV !== "production") {
       if (env.BKASH_IS_LIVE && env.BKASH_BASE_URL) issue("BKASH_IS_LIVE", "Live bKash is only allowed when NODE_ENV=production");
-      if (env.SSLCOMMERZ_IS_LIVE && env.SSLCOMMERZ_STORE_ID) {
-        issue("SSLCOMMERZ_IS_LIVE", "Live SSLCOMMERZ is only allowed when NODE_ENV=production");
-      }
     }
     if (env.NODE_ENV === "production") {
       if (!env.BETTER_AUTH_URL.startsWith("https://")) {
@@ -185,8 +199,8 @@ export type Env = Omit<z.infer<typeof schema>, "MAIL_TRANSPORT"> & {
     authScheme: "bearer" | "raw";
     refundsEnabled: boolean;
   } | null;
-  /** null = SSLCOMMERZ is not configured (unavailable). */
-  sslcommerz: { storeId: string; storePassword: string; isLive: boolean; refundsEnabled: boolean } | null;
+  /** null = private document storage is not configured (uploads answer 503). */
+  documents: { key: Buffer; keyId: string } | null;
   /** null = the AI assistant is not configured (unavailable). */
   ai: { serviceUrl: string; serviceToken: string; appApiToken: string; timeoutMs: number; ratePerMinute: number } | null;
 };
@@ -223,15 +237,7 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
             refundsEnabled: env.BKASH_REFUNDS_ENABLED,
           }
         : null,
-    sslcommerz:
-      env.SSLCOMMERZ_STORE_ID && env.SSLCOMMERZ_STORE_PASSWORD
-        ? {
-            storeId: env.SSLCOMMERZ_STORE_ID,
-            storePassword: env.SSLCOMMERZ_STORE_PASSWORD,
-            isLive: env.SSLCOMMERZ_IS_LIVE,
-            refundsEnabled: env.SSLCOMMERZ_REFUNDS_ENABLED,
-          }
-        : null,
+    documents: env.DOCUMENT_ENCRYPTION_KEY ? { key: Buffer.from(env.DOCUMENT_ENCRYPTION_KEY, "base64"), keyId: env.DOCUMENT_ENCRYPTION_KEY_ID } : null,
     ai:
       env.AI_SERVICE_URL && env.AI_SERVICE_TOKEN && env.APP_API_SERVICE_TOKEN
         ? {

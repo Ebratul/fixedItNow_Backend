@@ -2,7 +2,7 @@ import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query } fr
 import { Throttle } from "@nestjs/throttler";
 import { z } from "zod";
 import type { AuthContext } from "../auth/auth.types.js";
-import { CurrentAuth, RequireAdmin } from "../auth/decorators.js";
+import { CurrentAuth, RequirePermission } from "../auth/decorators.js";
 import { ZodPipe } from "../common/zod.pipe.js";
 import {
   CONTENT_PATHS,
@@ -21,12 +21,12 @@ const contentPath = z.enum(Object.keys(CONTENT_PATHS) as [keyof typeof CONTENT_P
 const uuid = () => new ParseUUIDPipe();
 
 /**
- * Every route is administrator-only. `RequireAdmin` re-reads the role from the
+ * Every route needs a moderation permission. `RequirePermission` re-reads the role from the
  * database on each request (see AuthGuard), so nothing the client sends (hidden
  * buttons, ids, body fields) can grant access. Queues are paginated with a fixed
  * page size and expose public names only: no emails, no account ids.
  */
-@RequireAdmin()
+@RequirePermission("moderation.read")
 @Controller("admin")
 export class ModerationController {
   constructor(private readonly moderation: ModerationService) {}
@@ -51,6 +51,7 @@ export class ModerationController {
     return this.moderation.getReport(id);
   }
 
+  @RequirePermission("moderation.manage")
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Post("reports/:id/decision")
   @HttpCode(200)
@@ -59,6 +60,7 @@ export class ModerationController {
   }
 
   /** Hide or restore content directly (without a report). */
+  @RequirePermission("moderation.manage")
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Post("moderation/:type/:id/visibility")
   @HttpCode(200)
@@ -76,6 +78,7 @@ export class ModerationController {
     return this.moderation.listProposals(q);
   }
 
+  @RequirePermission("moderation.manage")
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Post("proposals/:id/status")
   @HttpCode(200)

@@ -6,6 +6,8 @@ import { configureApp } from "../src/app.setup.js";
 import { ENV, loadEnv } from "../src/config/env.js";
 import { Clock } from "../src/bookings/clock.js";
 import { AiClient } from "../src/ai/ai-client.js";
+import { DEFAULT_ROLES } from "../src/admin/permissions.js";
+import { SettingsService } from "../src/admin/settings/settings.service.js";
 import { MailService } from "../src/mail/mail.service.js";
 import { HttpClient } from "../src/payments/providers/http.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
@@ -37,6 +39,8 @@ export async function createTestApp(overrides: Record<string, string> = {}, fake
     BETTER_AUTH_URL: WEB_ORIGIN,
     FRONTEND_ORIGIN: WEB_ORIGIN,
     MAIL_TRANSPORT: "console",
+    // Fixed test key (never used outside tests): enables the encrypted identity-document store.
+    DOCUMENT_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
     // Most tests make many sign-ins from one IP; dedicated tests turn this on.
     RATE_LIMIT_ENABLED: "false",
     ...overrides,
@@ -73,8 +77,13 @@ export async function createTestApp(overrides: Record<string, string> = {}, fake
 
   async function resetData() {
     await prisma.$executeRawUnsafe(
-      `TRUNCATE "payment_event","refund","payment","dispute_message","dispute","booking_event","reschedule_request","quote","booking","worker_time_off","worker_availability_rule","audit_log","favorite","worker_service","worker_profile","customer_profile","session","account","verification","rateLimit","user" CASCADE`,
+      `TRUNCATE "chat_message","payment_event","refund","payment","dispute_message","dispute","booking_event","reschedule_request","quote","booking","worker_time_off","worker_availability_rule","audit_log","favorite","worker_service","worker_profile","customer_profile","session","account","verification","rateLimit","platform_setting","knowledge_revision","knowledge_document","user" CASCADE`,
     );
+    // Admin roles: keep super_admin (created by the migration) and the seeded starting roles at their
+    // defaults; drop anything a test created. Categories created by tests are removed too.
+    await prisma.adminRole.deleteMany({ where: { key: { notIn: ["super_admin", ...DEFAULT_ROLES.map((r) => r.key)] } } });
+    for (const role of DEFAULT_ROLES) await prisma.adminRole.updateMany({ where: { key: role.key }, data: { name: role.name, description: role.description, permissions: role.permissions } });
+    app.get(SettingsService).invalidate();
     mail.outbox.length = 0;
     net.reset();
     clock.set("2026-11-01T06:00:00Z");
@@ -88,27 +97,43 @@ export async function createTestApp(overrides: Record<string, string> = {}, fake
     return url.pathname + url.search;
   }
 
-  /** Registers, verifies via the emailed link, and returns a logged-in client. */
+  /** The 6-digit code in the latest verification email to `to` (console transport only). */
+  function lastOtp(to: string) {
+    const message = [...mail.outbox].reverse().find((m) => m.kind === "verify-otp" && m.to === to);
+    return message ? /\b(\d{6})\b/.exec(message.text)?.[1] : undefined;
+  }
+
+  /** Registers, verifies the emailed CODE (sets the session cookie), and returns a logged-in client. */
   async function signUpAndLogin(email: string, name = "Test User") {
     const agent = client();
     await agent.post(`${api}/auth/sign-up/email`).send({ name, email, password: PASSWORD });
-    const link = lastLink("verify-email", email);
-    if (!link) throw new Error("verification email was not sent");
-    await agent.get(link); // verifies + sets the session cookie
+    const otp = lastOtp(email);
+    if (!otp) throw new Error("verification code was not sent");
+    const verified = await agent.post(`${api}/auth/email-otp/verify-email`).send({ email, otp, password: PASSWORD });
+    if (verified.status !== 200) throw new Error(`code verification failed: ${verified.status}`);
     const me = await agent.get(`${api}/me`);
     if (me.status !== 200) throw new Error(`login failed: ${me.status}`);
     return { agent, userId: me.body.user.id as string, email };
   }
 
-  /** Simulates the trusted operator process (`npm run admin:grant`). */
-  async function makeAdmin(userId: string) {
-    await prisma.user.update({ where: { id: userId }, data: { role: "ADMIN" } });
+  /** Simulates the trusted operator process (`npm run admin:grant`). Defaults to the super_admin role. */
+  async function makeAdmin(userId: string, roleKey = "super_admin") {
+    const role = await prisma.adminRole.findUniqueOrThrow({ where: { key: roleKey } });
+    await prisma.user.update({ where: { id: userId }, data: { role: "ADMIN", adminRoleId: role.id } });
   }
 
-  async function newAdmin() {
+  async function newAdmin(roleKey = "super_admin") {
     const admin = await signUpAndLogin(uniqueEmail("admin"));
-    await makeAdmin(admin.userId);
+    await makeAdmin(admin.userId, roleKey);
     return admin;
+  }
+
+  /** An admin whose role holds exactly `permissions` (a throwaway custom role). */
+  async function newAdminWith(permissions: string[], key = `t_${Math.random().toString(36).slice(2, 10)}`) {
+    const role = await prisma.adminRole.create({ data: { key, name: key, description: "test role", permissions } });
+    const admin = await signUpAndLogin(uniqueEmail("limited"));
+    await prisma.user.update({ where: { id: admin.userId }, data: { role: "ADMIN", adminRoleId: role.id } });
+    return { ...admin, roleId: role.id, roleKey: key };
   }
 
   /**
@@ -146,8 +171,8 @@ export async function createTestApp(overrides: Record<string, string> = {}, fake
   }
 
   return {
-    app, prisma, mail, env, clock, net, api, client, resetData, lastLink, signUpAndLogin, makeAdmin,
-    newAdmin, createWorker,
+    app, prisma, mail, env, clock, net, api, client, resetData, lastLink, lastOtp, signUpAndLogin, makeAdmin,
+    newAdmin, newAdminWith, createWorker,
     close: () => app.close(),
   };
 }

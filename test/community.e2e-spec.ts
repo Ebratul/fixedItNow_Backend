@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { bookableWorker, completedBooking, customer } from "./booking-helpers.js";
+import { TEST_ENV } from "./fake-providers.js";
 import { createTestApp, uniqueEmail, type TestApp } from "./helpers.js";
 
 describe("community, reactions, reports and proposals", () => {
   let t: TestApp;
-  beforeAll(async () => { t = await createTestApp(); });
+  beforeAll(async () => { t = await createTestApp(TEST_ENV); });
   afterAll(() => t.close());
   beforeEach(() => t.resetData());
 

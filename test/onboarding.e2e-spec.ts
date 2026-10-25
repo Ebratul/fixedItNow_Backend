@@ -161,7 +161,7 @@ describe("onboarding", () => {
     it("serves active categories from the database", async () => {
       const res = await t.client().get(`${t.api}/categories`);
       expect(res.body.categories.length).toBeGreaterThanOrEqual(10);
-      expect(res.body.categories[0]).toEqual({ slug: expect.any(String), name: expect.any(String), description: expect.any(String), workerCount: 0 });
+      expect(res.body.categories[0]).toEqual({ slug: expect.any(String), name: expect.any(String), description: expect.any(String), workerCount: 0, subcategories: [] });
     });
   });
 });

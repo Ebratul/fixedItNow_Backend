@@ -15,6 +15,8 @@ export const MAX_ADVANCE_DAYS = 90;
 
 /** A worker may start a confirmed job this long before its scheduled start. */
 export const START_EARLY_MINUTES = 30;
+/** ...and may still report arriving / start it this long after the scheduled end (24 h). */
+export const START_WINDOW_AFTER_END_MINUTES = 24 * 60;
 
 export const QUOTE_DEFAULT_VALID_HOURS = 48;
 export const QUOTE_MAX_VALID_HOURS = 168;

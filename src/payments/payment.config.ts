@@ -6,13 +6,13 @@ import type { BookingStatus, PaymentStatus } from "../generated/prisma/client.js
 
 export const CURRENCY = "BDT";
 
-/** Booking statuses in which the agreed amount may be paid. Payment never gates confirmation. */
-export const PAYABLE_BOOKING_STATUSES: readonly BookingStatus[] = [
-  "CONFIRMED",
-  "IN_PROGRESS",
-  "COMPLETION_PENDING",
-  "COMPLETED",
-];
+/**
+ * Booking statuses in which the agreed amount may be paid: once the professional reported the work finished
+ * (COMPLETION_PENDING = payment due). COMPLETED stays payable for the one case where an administrator
+ * completed a disputed booking that was never paid; paying it completes nothing further. Payment never gates
+ * confirmation, but it does gate completion and reviews (docs/PAYMENTS.md).
+ */
+export const PAYABLE_BOOKING_STATUSES: readonly BookingStatus[] = ["COMPLETION_PENDING", "COMPLETED"];
 
 /** Attempts that may still turn into a payment (a provider outcome is awaited). */
 export const OPEN_PAYMENT_STATUSES: readonly PaymentStatus[] = ["PENDING", "INITIATED", "PROCESSING"];

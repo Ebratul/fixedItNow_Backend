@@ -11,6 +11,7 @@
     "deploy": "nest deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
+    "dev": "nest start --watch",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
@@ -26,6 +27,7 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "admin:grant": "tsx scripts/grant-admin.ts",
+    "kb:import": "tsx scripts/import-knowledge.ts",
     "prebuild": "prisma generate",
     "postinstall": "prisma generate",
     "check": "npm run typecheck && npm run lint && npm test && npm run test:e2e"

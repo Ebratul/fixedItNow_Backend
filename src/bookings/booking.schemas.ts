@@ -9,6 +9,7 @@ import {
   QUOTE_MAX_VALID_HOURS,
   SLOT_MINUTES,
 } from "./booking.config.js";
+import { FORBIDDEN_TEXT } from "../common/user-text.js";
 import { isDateKey } from "./time.js";
 
 /** ISO-8601 instant with an explicit offset/Z, parsed to a Date. */
@@ -16,12 +17,15 @@ export const instant = z.iso
   .datetime({ offset: true, message: "Use an ISO date-time with a timezone, e.g. 2026-11-01T10:00:00+06:00" })
   .transform((value) => new Date(value));
 
+// Same rules as the community/review text: NUL and other control or bidi-override characters are rejected
+// (Postgres cannot store NUL, so it would otherwise surface as a 500).
 const text = (min: number, max: number, label: string) =>
   z
     .string()
     .trim()
     .min(min, `${label} must be at least ${min} characters`)
-    .max(max, `${label} must be ${max} characters or fewer`);
+    .max(max, `${label} must be ${max} characters or fewer`)
+    .refine((value) => !FORBIDDEN_TEXT.test(value), `${label} contains unsupported characters`);
 
 const duration = z
   .number()
@@ -114,7 +118,12 @@ export const timeOffSchema = z
   .refine((v) => v.endAt > v.startAt, { path: ["endAt"], message: "End must be after start" });
 
 export const availabilityQuerySchema = z.object({
-  from: z.string().refine(isDateKey, "Use YYYY-MM-DD").optional(),
+  // The year bound keeps day arithmetic inside four-digit years (9999-12-31 + n days is not a valid date key).
+  from: z
+    .string()
+    .refine(isDateKey, "Use YYYY-MM-DD")
+    .refine((value) => Number(value.slice(0, 4)) >= 2000 && Number(value.slice(0, 4)) <= 2100, "Use a date between 2000 and 2100")
+    .optional(),
   days: z.coerce.number().int().min(1).max(14).default(7),
   duration: z.coerce.number().int().min(MIN_DURATION_MINUTES).max(MAX_DURATION_MINUTES).refine((n) => n % SLOT_MINUTES === 0).default(60),
 });

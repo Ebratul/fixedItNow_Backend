@@ -2,7 +2,7 @@ import { Global, Module } from "@nestjs/common";
 import { ENV, type Env } from "../config/env.js";
 import { MailService } from "../mail/mail.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
-import { AdminGuard } from "./admin.guard.js";
+import { PermissionGuard } from "./permission.guard.js";
 import { ApprovedWorkerGuard } from "./approved-worker.guard.js";
 import { AUTH, createAuth } from "./auth.factory.js";
 import { AuthGuard } from "./auth.guard.js";
@@ -19,9 +19,9 @@ import { OriginGuard } from "./origin.guard.js";
     },
     AuthGuard,
     OriginGuard,
-    AdminGuard,
+    PermissionGuard,
     ApprovedWorkerGuard,
   ],
-  exports: [AUTH, AuthGuard, OriginGuard, AdminGuard, ApprovedWorkerGuard],
+  exports: [AUTH, AuthGuard, OriginGuard, PermissionGuard, ApprovedWorkerGuard],
 })
 export class AuthModule {}

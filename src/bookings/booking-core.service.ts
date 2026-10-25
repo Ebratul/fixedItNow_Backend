@@ -6,6 +6,7 @@ import {
   DISPUTE_WINDOW_DAYS,
   MIN_LEAD_MINUTES,
   START_EARLY_MINUTES,
+  START_WINDOW_AFTER_END_MINUTES,
 } from "./booking.config.js";
 import {
   assertTransition,
@@ -265,6 +266,10 @@ export class BookingCore {
         currency: b.currency,
       },
       confirmedAt: b.confirmedAt,
+      // From this moment the professional may report arriving / start the job (the server enforces it; the UI explains it).
+      startWindowOpensAt: addMinutes(b.startAt, -START_EARLY_MINUTES),
+      // The professional's own report that they arrived. NOT a verified location: nothing here is GPS-checked.
+      arrivedAt: b.arrivedAt,
       startedAt: b.startedAt,
       completionRequestedAt: b.completionRequestedAt,
       completedAt: b.completedAt,
@@ -296,10 +301,14 @@ export class BookingCore {
     if (isWorker && (status === "REQUESTED" || status === "QUOTED") && b.pricingModel === "QUOTE") out.push("quote");
     if (isCustomer && ["REQUESTED", "QUOTED", "CONFIRMED"].includes(status)) out.push("cancel");
     if (isWorker && status === "CONFIRMED") out.push("cancel");
+    // Arrival and start share a window: from START_EARLY_MINUTES before the start until 24 h after the end.
+    const inStartWindow = now >= startWindowOpens && now <= addMinutes(b.endAt, START_WINDOW_AFTER_END_MINUTES);
+    if (isWorker && status === "CONFIRMED" && inStartWindow && b.arrivedAt === null) out.push("arrive");
     if (isWorker && status === "CONFIRMED" && now >= startWindowOpens) out.push("start");
     if (isWorker && status === "IN_PROGRESS") out.push("complete");
-    if (isCustomer && status === "COMPLETION_PENDING") out.push("confirm_completion");
-    if (status === "CONFIRMED" && !ctx.hasPendingReschedule && b.startAt > addMinutes(now, MIN_LEAD_MINUTES)) {
+    if (isCustomer && (status === "CONFIRMED" || status === "IN_PROGRESS")) out.push("mark_finished");
+    // Payment completes the booking (see PaymentsService); there is no "confirm completion" action.
+    if (status === "CONFIRMED" && b.arrivedAt === null && !ctx.hasPendingReschedule && b.startAt > addMinutes(now, MIN_LEAD_MINUTES)) {
       out.push("reschedule");
     }
     if (!ctx.hasDispute && this.canOpenDispute(b, status, now)) out.push("open_dispute");

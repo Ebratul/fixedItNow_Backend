@@ -59,6 +59,14 @@ model User {
 
   /// Trusted, DB-only. Not exposed to or settable by Better Auth clients.
   role UserRole @default(USER)
+  /// Admin panel: the permission set of an ADMIN. Null = no admin permissions (fail closed).
+  /// A CHECK in the migration keeps it null for non-admins.
+  adminRoleId String?
+  adminRole   AdminRole? @relation("UserAdminRole", fields: [adminRoleId], references: [id], onDelete: Restrict)
+  /// Account restriction set by an administrator (reason is internal). Sessions are revoked and
+  /// every authenticated request is refused while set.
+  suspendedAt      DateTime?
+  suspensionReason String?
 
   sessions         Session[]
   accounts         Account[]
@@ -72,6 +80,7 @@ model User {
 
   // Step 9: reviews, community, proposals, moderation
   reviews             Review[]          @relation("ReviewAuthor")
+  chatMessages        ChatMessage[]     @relation("ChatSender")
   moderatedReviews    Review[]          @relation("ReviewModerator")
   posts               CommunityPost[]   @relation("PostAuthor")
   moderatedPosts      CommunityPost[]   @relation("PostModerator")
@@ -85,6 +94,15 @@ model User {
   reportsFiled        ContentReport[]   @relation("ReportReporter")
   reportsReviewed     ContentReport[]   @relation("ReportReviewer")
 
+  // Admin panel
+  supportTickets   SupportTicket[]        @relation("TicketRequester")
+  assignedTickets  SupportTicket[]        @relation("TicketAssignee")
+  ticketMessages   SupportTicketMessage[]
+  notifications    Notification[]
+  announcements    Announcement[]         @relation("AnnouncementAuthor")
+
+  @@index([role])
+  @@index([createdAt])
   @@map("user")
 }
 
@@ -172,12 +190,17 @@ model ServiceCategory {
   description String
   sortOrder   Int      @default(0)
   isActive    Boolean  @default(true)
+  /// Subcategory support: one level only (a child cannot have children; CHECK + service rule).
+  parentId    String?
+  parent      ServiceCategory?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children    ServiceCategory[] @relation("CategoryTree")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   workerServices WorkerService[]
   bookings       Booking[]
 
+  @@index([parentId])
   @@map("service_category")
 }
 
@@ -230,6 +253,7 @@ model WorkerProfile {
   timeOff           WorkerTimeOff[]
   bookings          Booking[]                @relation("WorkerBookings")
   reviews           Review[]
+  documents         WorkerDocument[]
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
 
@@ -284,8 +308,18 @@ model AuditLog {
   metadata   Json?
   createdAt  DateTime @default(now())
 
+  // Tamper evidence (migration 20261101000000_admin_panel). These four columns are written ONLY by the
+  // BEFORE INSERT trigger audit_log_chain(): seq is gap-free, hash = sha256(canonical row + prevHash),
+  // actorSnapshot keeps the actor id in the hashed content after a user deletion detaches actorId.
+  seq           Int     @unique @default(0)
+  prevHash      String  @default("")
+  hash          String  @default("")
+  actorSnapshot String?
+
   @@index([targetType, targetId])
   @@index([actorId])
+  @@index([action, createdAt])
+  @@index([createdAt])
   @@map("audit_log")
 }
 
@@ -420,6 +454,8 @@ model Booking {
   acceptedQuoteId String?      @unique
 
   confirmedAt           DateTime?
+  /// The professional's own report that they arrived. Self-reported: no location is verified.
+  arrivedAt             DateTime?
   startedAt             DateTime?
   completionRequestedAt DateTime?
   completedAt           DateTime?
@@ -438,11 +474,34 @@ model Booking {
   dispute            Dispute?
   payments           Payment[]
   review             Review?
+  supportTickets     SupportTicket[]
+  chatMessages       ChatMessage[]
 
   @@unique([customerId, idempotencyKey])
   @@index([customerId, createdAt])
   @@index([workerProfileId, status, startAt])
   @@map("booking")
+}
+
+/// A message in the private conversation of ONE booking. Append-only (database trigger): messages are never
+/// edited or deleted. Only the booking's customer and assigned professional can write, and only once the booking
+/// was confirmed (also enforced by a trigger). Ordered by `seq`, never by timestamp.
+model ChatMessage {
+  id              String    @id @default(uuid(7))
+  seq             Int       @unique @default(autoincrement())
+  bookingId       String
+  booking         Booking   @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  senderId        String
+  sender          User      @relation("ChatSender", fields: [senderId], references: [id], onDelete: Restrict)
+  senderRole      ActorRole
+  body            String
+  /// Chosen by the sender's browser once per message so a retry cannot create a second row.
+  clientMessageId String
+  createdAt       DateTime  @default(now())
+
+  @@unique([bookingId, senderId, clientMessageId])
+  @@index([bookingId, seq])
+  @@map("chat_message")
 }
 
 /// Append-only history and audit trail for a booking.
@@ -562,6 +621,8 @@ model DisputeMessage {
 // prisma/migrations/*_step6_payments/migration.sql. See docs/PAYMENTS.md.
 // ---------------------------------------------------------------------------
 
+/// SSLCOMMERZ is no longer supported and nothing creates it; the value stays so any historical row remains valid
+/// (removing an enum value needs a data migration).
 enum PaymentProvider {
   BKASH
   SSLCOMMERZ
@@ -625,11 +686,11 @@ model Payment {
   refundedAmountBdt Int     @default(0)
 
   idempotencyKey        String?
-  /// bKash paymentId / SSLCOMMERZ session key.
+  /// bKash paymentId.
   providerPaymentId     String?
-  /// bKash trxId / SSLCOMMERZ bank_tran_id (needed for refunds).
+  /// bKash trxId (needed for refunds).
   providerTransactionId String?
-  /// SSLCOMMERZ val_id.
+  /// Unused since SSLCOMMERZ support was removed.
   providerValidationId  String?
   checkoutUrl           String?
   failureCode           String?
@@ -696,7 +757,7 @@ model Refund {
 
   /// Our unique id for this refund, sent to the provider where it takes one.
   providerRefundReference String  @unique
-  /// Provider's refund id (SSLCOMMERZ refund_ref_id / bKash refundTrxId), once known.
+  /// Provider's refund id (bKash refundTrxId), once known.
   providerRefundId        String?
   failureCode             String?
   processStartedAt        DateTime?
@@ -948,4 +1009,234 @@ model ContentReport {
   @@index([reviewId])
   @@index([proposalId])
   @@map("content_report")
+}
+
+// ---------------------------------------------------------------------------
+// Admin panel
+// ---------------------------------------------------------------------------
+
+/// A named set of admin permissions. The system role `super_admin` stores ["*"] (every permission,
+/// including ones added later), cannot be edited or deleted, and always keeps at least one holder.
+model AdminRole {
+  id          String   @id @default(uuid(7))
+  key         String   @unique
+  name        String
+  description String
+  permissions String[]
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users User[] @relation("UserAdminRole")
+
+  @@map("admin_role")
+}
+
+enum DocumentKind {
+  NID_FRONT
+  NID_BACK
+  SELFIE_WITH_ID
+}
+
+/// A worker's identity document, stored ENCRYPTED (AES-256-GCM, key from DOCUMENT_ENCRYPTION_KEY,
+/// additional authenticated data = id|profile|kind). There is no public URL: the only read path is
+/// GET /admin/workers/:id/documents/:kind, which needs workers.documents.view and writes an audit
+/// row per view. One document per (profile, kind); a new upload replaces the old bytes.
+model WorkerDocument {
+  id              String        @id @default(uuid(7))
+  workerProfileId String
+  workerProfile   WorkerProfile @relation(fields: [workerProfileId], references: [id], onDelete: Cascade)
+  kind            DocumentKind
+  mimeType        String
+  sizeBytes       Int
+  /// SHA-256 of the plaintext (integrity / duplicate detection); not the NID number.
+  sha256          String
+  keyId           String
+  iv              Bytes
+  authTag         Bytes
+  ciphertext      Bytes
+  uploadedAt      DateTime      @default(now())
+
+  @@unique([workerProfileId, kind])
+  @@map("worker_document")
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_FOR_USER
+  RESOLVED
+  CLOSED
+}
+
+enum TicketCategory {
+  GENERAL
+  BOOKING
+  PAYMENT
+  ACCOUNT
+  WORKER_COMPLAINT
+  CUSTOMER_COMPLAINT
+  SAFETY
+  OTHER
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+/// A support request or complaint raised by a signed-in user.
+model SupportTicket {
+  id          String         @id @default(uuid(7))
+  /// Human-friendly number shown in the UI (#1001).
+  number      Int            @unique @default(autoincrement())
+  requesterId String
+  requester   User           @relation("TicketRequester", fields: [requesterId], references: [id], onDelete: Restrict)
+  category    TicketCategory
+  priority    TicketPriority @default(NORMAL)
+  subject     String
+  status      TicketStatus   @default(OPEN)
+  /// Optional: the booking the ticket is about (requester must be a party; checked on create).
+  bookingId   String?
+  booking     Booking?       @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  assigneeId  String?
+  assignee    User?          @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  resolution  String?
+  resolvedAt  DateTime?
+  lastMessageAt DateTime     @default(now())
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  messages SupportTicketMessage[]
+
+  @@index([status, priority, lastMessageAt])
+  @@index([requesterId, createdAt])
+  @@index([assigneeId, status])
+  @@map("support_ticket")
+}
+
+/// `internal` messages are staff-only notes and are never returned to the requester.
+model SupportTicketMessage {
+  id         String        @id @default(uuid(7))
+  ticketId   String
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId   String
+  author     User          @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  authorRole ActorRole
+  body       String
+  internal   Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+
+  @@index([ticketId, createdAt])
+  @@map("support_ticket_message")
+}
+
+enum AnnouncementAudience {
+  ALL
+  CUSTOMERS
+  WORKERS
+}
+
+enum AnnouncementSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AnnouncementStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+/// A platform-wide message shown in the web app. Not fanned out per user: clients read the
+/// active ones (PUBLISHED and inside [startsAt, endsAt)) for their audience.
+model Announcement {
+  id          String               @id @default(uuid(7))
+  title       String
+  body        String
+  audience    AnnouncementAudience @default(ALL)
+  severity    AnnouncementSeverity @default(INFO)
+  status      AnnouncementStatus   @default(DRAFT)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  publishedAt DateTime?
+  createdById String
+  createdBy   User                 @relation("AnnouncementAuthor", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@index([status, audience, startsAt])
+  @@map("announcement")
+}
+
+/// A personal in-app notification. `link` is an in-app path only (CHECK in the migration).
+model Notification {
+  id        String    @id @default(uuid(7))
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt, createdAt(sort: Desc)])
+  @@map("notification")
+}
+
+/// Runtime-editable platform settings. Keys, types and defaults live in the code registry
+/// (src/admin/settings/registry.ts); unknown keys are rejected at the API and ignored when read.
+model PlatformSetting {
+  key         String   @id
+  value       Json
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("platform_setting")
+}
+
+enum KnowledgeStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+/// A document of the assistant's knowledge base, managed by admins. Only PUBLISHED documents are
+/// served to the AI service (GET /internal/ai/knowledge, service-token protected).
+model KnowledgeDocument {
+  id          String          @id @default(uuid(7))
+  slug        String          @unique
+  title       String
+  /// In-app path the assistant may link to for this topic.
+  url         String
+  body        String
+  status      KnowledgeStatus @default(DRAFT)
+  version     Int             @default(1)
+  updatedById String?
+  publishedAt DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  revisions KnowledgeRevision[]
+
+  @@index([status])
+  @@map("knowledge_document")
+}
+
+model KnowledgeRevision {
+  id          String            @id @default(uuid(7))
+  documentId  String
+  document    KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  version     Int
+  title       String
+  body        String
+  createdById String?
+  createdAt   DateTime          @default(now())
+
+  @@unique([documentId, version])
+  @@map("knowledge_revision")
 }

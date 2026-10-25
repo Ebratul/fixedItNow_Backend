@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { AuthContext } from "../auth/auth.types.js";
+import { expandPermissions } from "../admin/permissions.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { CustomerProfileInput } from "./customer-profile.schema.js";
 
@@ -47,6 +48,7 @@ export class MeService {
         emailVerified: true,
         image: true,
         role: true,
+        adminRole: { select: { key: true, name: true, permissions: true } },
         customerProfile: {
           select: { displayName: true, preferredDivision: true },
         },
@@ -54,10 +56,15 @@ export class MeService {
       },
     });
 
-    const { role, customerProfile, workerProfile, ...account } = user;
+    const { role, adminRole, customerProfile, workerProfile, ...account } = user;
     return {
       user: account,
       isAdmin: role === "ADMIN",
+      // Shown so the admin UI can hide what the server would refuse. The server decides, every time.
+      admin:
+        role === "ADMIN"
+          ? { role: adminRole ? { key: adminRole.key, name: adminRole.name } : null, permissions: adminRole ? [...expandPermissions(adminRole.permissions)] : [] }
+          : null,
       customer: customerProfile ? { onboarded: true, profile: customerProfile } : { onboarded: false },
       worker: workerProfile
         ? {

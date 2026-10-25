@@ -9,6 +9,8 @@ export type AuthContext = {
   sessionId: string;
   /** Always read from the database, never from the session or the client. */
   role: UserRole;
+  /** Effective admin permissions (empty for non-admins and for admins without a role). From the database. */
+  permissions: readonly string[];
 };
 
 export type WorkerContext = {

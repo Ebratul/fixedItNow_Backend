@@ -8,7 +8,7 @@ import { z } from "zod";
  * (used to spoof text direction) are rejected.
  */
 // eslint-disable-next-line no-control-regex
-const FORBIDDEN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f‪-‮⁦-⁩﻿]/;
+export const FORBIDDEN_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f‪-‮⁦-⁩﻿]/;
 
 export function userText(min: number, max: number, label = "Text") {
   return z
@@ -19,7 +19,7 @@ export function userText(min: number, max: number, label = "Text") {
         .string()
         .min(min, min === 1 ? `${label} is required` : `${label} must be at least ${min} characters`)
         .max(max, `${label} must be ${max} characters or fewer`)
-        .refine((value) => !FORBIDDEN.test(value), `${label} contains unsupported characters`),
+        .refine((value) => !FORBIDDEN_TEXT.test(value), `${label} contains unsupported characters`),
     );
 }
 
@@ -32,7 +32,7 @@ export function optionalUserText(max: number, label = "Text") {
       z
         .string()
         .max(max, `${label} must be ${max} characters or fewer`)
-        .refine((value) => !FORBIDDEN.test(value), `${label} contains unsupported characters`),
+        .refine((value) => !FORBIDDEN_TEXT.test(value), `${label} contains unsupported characters`),
     )
     .transform((value) => (value === "" ? undefined : value))
     .optional();
@@ -49,7 +49,7 @@ export function nullableUserText(max: number, label = "Text") {
           z
             .string()
             .max(max, `${label} must be ${max} characters or fewer`)
-            .refine((value) => !FORBIDDEN.test(value), `${label} contains unsupported characters`),
+            .refine((value) => !FORBIDDEN_TEXT.test(value), `${label} contains unsupported characters`),
         )
         .transform((value) => (value === "" ? null : value)),
       z.null(),

@@ -5,10 +5,12 @@ import {
   Injectable,
 } from "@nestjs/common";
 import type { AuthContext } from "../auth/auth.types.js";
+import { unprocessable } from "../bookings/domain-errors.js";
 import { workerProfileSelect } from "../me/me.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { canPublish } from "../workers/eligibility.js";
 import { newSlug } from "../workers/slug.js";
+import { REQUIRED_KINDS, WorkerDocumentsService } from "./worker-documents.service.js";
 import {
   workerSubmitSchema,
   type WorkerDraftInput,
@@ -19,7 +21,10 @@ const SUBMITTABLE = new Set(["NOT_SUBMITTED", "RESUBMISSION_REQUIRED"]);
 
 @Injectable()
 export class WorkerProfileService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly documents: WorkerDocumentsService,
+  ) {}
 
   /**
    * Saves onboarding progress to the CALLER's worker profile, creating it on
@@ -110,6 +115,17 @@ export class WorkerProfileService {
       });
     }
 
+    // Optional by default; an administrator can make both sides of the ID compulsory before submitting.
+    if (await this.documents.documentsRequired()) {
+      const uploaded = await this.prisma.workerDocument.findMany({
+        where: { workerProfileId: profile.id, kind: { in: [...REQUIRED_KINDS] } },
+        select: { kind: true },
+      });
+      if (REQUIRED_KINDS.some((kind) => !uploaded.some((d) => d.kind === kind))) {
+        throw unprocessable("DOCUMENTS_REQUIRED", "Upload both sides of your National ID before submitting your profile.");
+      }
+    }
+
     return this.prisma.workerProfile.update({
       where: { userId: auth.userId },
       data: {
@@ -150,24 +166,22 @@ export class WorkerProfileService {
 
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        const result = await this.prisma.workerProfile.updateMany({
-          where: {
-            id: profile.id,
-            onboardingStatus: "SUBMITTED",
-            verificationStatus: "VERIFIED",
-            suspendedAt: null,
-          },
-          data: {
-            publishedAt: profile.publishedAt ?? new Date(),
-            slug: profile.slug ?? newSlug(profile.displayName ?? "worker"),
-          },
-        });
-        if (result.count === 0) {
-          throw new ConflictException("Only approved profiles can be published");
-        }
-        return this.prisma.workerProfile.findUniqueOrThrow({
-          where: { id: profile.id },
-          select: workerProfileSelect,
+        // The row is locked while the slug is decided, so concurrent publishes cannot each pick a
+        // different slug (the last writer would silently change a slug another request just returned).
+        return await this.prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT 1 FROM "worker_profile" WHERE "id" = ${profile.id} FOR UPDATE`;
+          const fresh = await tx.workerProfile.findUniqueOrThrow({ where: { id: profile.id }, select: { slug: true, publishedAt: true } });
+          const result = await tx.workerProfile.updateMany({
+            where: { id: profile.id, onboardingStatus: "SUBMITTED", verificationStatus: "VERIFIED", suspendedAt: null },
+            data: {
+              publishedAt: fresh.publishedAt ?? new Date(),
+              slug: fresh.slug ?? newSlug(profile.displayName ?? "worker"),
+            },
+          });
+          if (result.count === 0) {
+            throw new ConflictException("Only approved profiles can be published");
+          }
+          return tx.workerProfile.findUniqueOrThrow({ where: { id: profile.id }, select: workerProfileSelect });
         });
       } catch (error) {
         // Slug collision (unique index): draw a new suffix and retry.

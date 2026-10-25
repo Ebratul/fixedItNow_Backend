@@ -2,6 +2,7 @@ import { HttpException, HttpStatus, Inject, Injectable, Logger } from "@nestjs/c
 import { createHash, randomUUID } from "node:crypto";
 import { currentRequestId } from "../common/request-context.js";
 import { ENV, type Env } from "../config/env.js";
+import { SettingsService } from "../admin/settings/settings.service.js";
 import { WorkersService } from "../workers/workers.service.js";
 import { AiClient, AiClientError } from "./ai-client.js";
 import { AiRateLimiter } from "./ai-rate-limiter.js";
@@ -34,15 +35,20 @@ export class AiService {
     private readonly client: AiClient,
     private readonly workers: WorkersService,
     private readonly limiter: AiRateLimiter,
+    private readonly settings: SettingsService,
   ) {}
 
-  status() {
-    return { available: this.env.ai !== null };
+  /** Configured AND not switched off by an administrator (platform setting `ai.assistantEnabled`). */
+  async status() {
+    return { available: this.env.ai !== null && (await this.settings.get("ai.assistantEnabled")) };
   }
 
   async chat(userId: string, request: ChatRequest) {
     const ai = this.env.ai;
     if (!ai) throw aiError(HttpStatus.SERVICE_UNAVAILABLE, "AI_NOT_CONFIGURED", "The assistant is not available right now.");
+    if (!(await this.settings.get("ai.assistantEnabled"))) {
+      throw aiError(HttpStatus.SERVICE_UNAVAILABLE, "AI_NOT_CONFIGURED", "The assistant is paused for now. You can still search for professionals.");
+    }
 
     const wait = this.limiter.check(userId, ai.ratePerMinute);
     if (wait > 0) {

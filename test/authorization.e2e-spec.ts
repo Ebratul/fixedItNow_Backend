@@ -96,10 +96,11 @@ describe("authorization", () => {
     });
 
     it("admin status is re-read from the database on every request", async () => {
+      await t.newAdmin(); // another super administrator, so this one is not the last (the database protects the last)
       const u = await t.signUpAndLogin(uniqueEmail());
       await t.makeAdmin(u.userId);
       expect((await u.agent.get(`${t.api}/admin/workers`)).status).toBe(200);
-      await t.prisma.user.update({ where: { id: u.userId }, data: { role: "USER" } });
+      await t.prisma.user.update({ where: { id: u.userId }, data: { role: "USER", adminRoleId: null } }); // the CHECK constraint forbids a role on a non-admin
       expect((await u.agent.get(`${t.api}/admin/workers`)).status).toBe(403); // same session, role revoked
     });
   });
@@ -191,6 +192,20 @@ describe("authorization", () => {
       const audit = await t.prisma.auditLog.findFirstOrThrow({ where: { targetId: w.profileId } });
       expect(audit.actorId).toBe(a.userId);
       expect(audit.action).toBe("worker.verification.review");
+    });
+
+    it("two admins deciding at the same moment: exactly one decision is recorded, the other gets 409", async () => {
+      const w = await pendingWorker();
+      const [a, b] = [await admin(), await admin()];
+      const [r1, r2] = await Promise.all([
+        a.agent.post(`${t.api}/admin/workers/${w.profileId}/verification`).send({ decision: "VERIFIED" }),
+        b.agent.post(`${t.api}/admin/workers/${w.profileId}/verification`).send({ decision: "REJECTED", note: "Incomplete profile details." }),
+      ]);
+      expect([r1.status, r2.status].sort((x, y) => x - y)).toEqual([200, 409]);
+      const winner = r1.status === 200 ? a : b;
+      const row = await t.prisma.workerProfile.findUniqueOrThrow({ where: { id: w.profileId } });
+      expect(row.reviewedById).toBe(winner.userId);
+      expect(await t.prisma.auditLog.count({ where: { targetId: w.profileId, action: "worker.verification.review" } })).toBe(1);
     });
 
     it("requires a reason when not approving, and validates the id", async () => {

@@ -24,7 +24,7 @@ export class QuotesService {
 
   /** Worker sends a quote, or revises their pending one. */
   create(auth: AuthContext, bookingId: string, input: QuoteInput) {
-    return this.bookings.act(auth, bookingId, "WORKER", async (tx, { booking }, now) => {
+    return this.bookings.act(auth, bookingId, "WORKER", async (tx, { booking }, now, notify) => {
       if (booking.pricingModel !== "QUOTE") {
         throw unprocessable("QUOTE_NOT_ALLOWED", "This service has a fixed or hourly price. Accept the request instead.");
       }
@@ -68,6 +68,13 @@ export class QuotesService {
         eventType: booking.status === "QUOTED" ? "quote.revised" : "quote.sent",
         metadata: { quoteId, totalBdt: total },
       });
+      notify({
+        userId: booking.customerId,
+        type: "quote.received",
+        title: "You received a quote",
+        body: `${booking.workerProfile.displayName ?? "The professional"} sent a quote of ৳${total} for your ${booking.category.name} request.`,
+        link: `/bookings/${booking.id}`,
+      });
     });
   }
 
@@ -80,7 +87,7 @@ export class QuotesService {
 
   /** Customer accepts: validates, then atomically accepts the quote and CONFIRMS the booking. */
   accept(auth: AuthContext, bookingId: string, quoteId: string, expectedTotalBdt?: number) {
-    return this.bookings.act(auth, bookingId, "CUSTOMER", async (tx, { booking }, now) => {
+    return this.bookings.act(auth, bookingId, "CUSTOMER", async (tx, { booking }, now, notify) => {
       const quote = await this.loadQuote(tx, bookingId, quoteId);
       if (quote.status === "EXPIRED" || (quote.status === "PENDING" && quote.expiresAt <= now)) {
         throw conflict("QUOTE_EXPIRED", "This quote has expired. Ask the professional for a new one.");
@@ -111,6 +118,13 @@ export class QuotesService {
         data: { agreedAmountBdt: quote.totalBdt, acceptedQuoteId: quote.id, confirmedAt: now },
         eventType: "quote.accepted",
         metadata: { quoteId: quote.id, agreedAmountBdt: quote.totalBdt },
+      });
+      notify({
+        userId: booking.workerProfile.userId,
+        type: "booking.accepted",
+        title: "Your quote was accepted",
+        body: `The customer accepted your ৳${quote.totalBdt} quote for ${booking.category.name}. The time is reserved and you can now message them.`,
+        link: `/bookings/${booking.id}?chat=1`,
       });
     });
   }

@@ -7,17 +7,32 @@ export type RatingSummary = { rating: number | null; reviewCount: number };
 export const NO_REVIEWS: RatingSummary = { rating: null, reviewCount: 0 };
 
 /**
+ * Payment states that make a booking REVIEWABLE and its review COUNTED: the customer's payment was verified
+ * by the provider and the money has not been fully given back. (PARTIALLY_REFUNDED still counts: the job
+ * happened and was paid for; REFUNDED does not; REQUIRES_REVIEW and every unpaid state never do.)
+ */
+export const REVIEWABLE_PAYMENT_STATUSES = ["SUCCEEDED", "PARTIALLY_REFUNDED"] as const;
+
+/**
  * WHICH REVIEWS COUNT. One definition, used by every rating shown anywhere
  * (cards, profile, reviews list, AI assistant):
  *   - the review is VISIBLE (not hidden by an admin, not withdrawn by its author), AND
- *   - its booking is currently COMPLETED. If a dispute moves the booking away
- *     from COMPLETED the review is not counted (and not shown as verified) until
- *     the booking is COMPLETED again.
+ *   - its booking is currently COMPLETED, AND
+ *   - that booking has a provider-verified payment (REVIEWABLE_PAYMENT_STATUSES).
+ * If a dispute moves the booking away from COMPLETED, or the payment is fully refunded, the review is not
+ * counted (and not shown as verified) until the booking qualifies again.
  */
 export const COUNTED_REVIEW = {
   status: "VISIBLE",
-  booking: { status: "COMPLETED" },
+  booking: { status: "COMPLETED", payments: { some: { status: { in: [...REVIEWABLE_PAYMENT_STATUSES] } } } },
 } as const satisfies Prisma.ReviewWhereInput;
+
+/** Can the customer review this booking right now? (Their ownership is checked separately.) */
+export async function isReviewable(db: Db, booking: { id: string; status: string }): Promise<boolean> {
+  if (booking.status !== "COMPLETED") return false;
+  const paid = await db.payment.count({ where: { bookingId: booking.id, status: { in: [...REVIEWABLE_PAYMENT_STATUSES] } }, take: 1 });
+  return paid > 0;
+}
 
 /** Average to one decimal, halves rounded up. Display policy: "4.3". */
 export function roundRating(average: number): number {

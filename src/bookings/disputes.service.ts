@@ -78,13 +78,14 @@ export class DisputesService {
         updatedAt: true,
         messages: {
           where: { internal: false },
-          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }], // newest 200, reversed below
           take: 200,
           select: { id: true, authorRole: true, body: true, createdAt: true },
         },
       },
     });
     if (!dispute) throw new NotFoundException("No dispute for this booking");
+    dispute.messages.reverse();
     return { dispute };
   }
 
@@ -162,14 +163,15 @@ export class DisputesService {
   async adminGet(disputeId: string) {
     const dispute = await this.prisma.dispute.findUnique({
       where: { id: disputeId },
-      include: { messages: { orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 500 } },
+      include: { messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 500 } }, // newest 500, reversed below
     });
     if (!dispute) throw new NotFoundException("Dispute not found");
+    dispute.messages.reverse();
     const booking = await this.core.reload(this.prisma, dispute.bookingId);
     const [events, quotes] = await Promise.all([
       this.prisma.bookingEvent.findMany({
         where: { bookingId: booking.id },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: 200,
         select: { type: true, actorRole: true, fromStatus: true, toStatus: true, reason: true, createdAt: true },
       }),
@@ -215,7 +217,7 @@ export class DisputesService {
         workerName: booking.workerProfile.displayName,
       },
       quotes,
-      events,
+      events: events.reverse(),
     };
   }
 

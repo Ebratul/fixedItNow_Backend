@@ -32,6 +32,12 @@ import {
  * with matching reference/amount/currency counts as payment.
  */
 
+/** `str()` caps at 200 characters, which suits ids but not a bKash id_token (~900 characters) or a checkout URL. */
+const longStr = (value: unknown, max: number): string | null =>
+  typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
+const MAX_TOKEN_CHARS = 8192;
+const MAX_URL_CHARS = 2048;
+
 const TOKEN_REFRESH_MARGIN_MS = 120_000;
 /** Grant-token is limited to 2 calls/hour (docs); after a failure do not hammer it. */
 const TOKEN_FAILURE_COOLDOWN_MS = 5 * 60_000;
@@ -46,7 +52,9 @@ type Call =
 export class BkashAdapter implements PaymentProviderAdapter {
   readonly id = "BKASH" as const;
   readonly label = "bKash";
-  readonly checkoutHostSuffixes = [".bka.sh"] as const;
+  // bKash returns the customer-facing checkout page (`bkashURL`) on its payment domain, which differs from the
+  // API domain. Both suffixes are bKash-owned. UNVERIFIED against a live sandbox: confirm the exact host there.
+  readonly checkoutHostSuffixes = [".bka.sh", ".bkash.com"] as const;
   /** The bKash pages read document no amount limit; real limits come from the merchant agreement. This is the largest booking the platform can create. */
   readonly amountLimitsBdt = { min: 1, max: 3_000_000 };
 
@@ -88,7 +96,7 @@ export class BkashAdapter implements PaymentProviderAdapter {
         json: { app_key: this.cfg.appKey, app_secret: this.cfg.appSecret },
       });
       const body = isRecord(res.body) ? res.body : {};
-      const idToken = str(body.id_token);
+      const idToken = longStr(body.id_token, MAX_TOKEN_CHARS);
       const status = body.statusCode === undefined ? "0000" : safeCode(body.statusCode);
       if (res.status >= 200 && res.status < 300 && idToken && status === "0000") {
         const seconds = typeof body.expires_in === "number" && body.expires_in > 0 ? body.expires_in : 3600;
@@ -153,7 +161,7 @@ export class BkashAdapter implements PaymentProviderAdapter {
     if (result.kind === "error") return { kind: "rejected", code: result.code };
     const { body } = result;
     const paymentId = str(body.paymentId ?? body.paymentID);
-    const checkoutUrl = str(body.bKashURL ?? body.bkashURL);
+    const checkoutUrl = longStr(body.bKashURL ?? body.bkashURL, MAX_URL_CHARS);
     if (!paymentId || !checkoutUrl) return { kind: "rejected", code: "BAD_RESPONSE" };
     // The echo must match what we asked for.
     const echoedInvoice = str(body.merchantInvoiceNumber);
@@ -242,12 +250,10 @@ export class BkashAdapter implements PaymentProviderAdapter {
     if (result.kind === "indeterminate") return { kind: "indeterminate", code: result.code };
     if (result.kind === "error") return { kind: "indeterminate", code: `BKASH_${result.code}` };
     const list = Array.isArray(result.body.refundTransactions) ? result.body.refundTransactions.filter(isRecord) : [];
-    const wanted = input.amountBdt * 100;
-    const match = list.find((entry) =>
-      input.providerRefundId
-        ? str(entry.refundTrxId ?? entry.refundTrxID) === input.providerRefundId
-        : parseDecimalToPoisha(entry.refundAmount) === wanted,
-    );
+    // Never match by amount: after a timed-out request there is no refund id, and an earlier refund of
+    // the same amount would be mistaken for this one (recording a refund that never moved money).
+    if (!input.providerRefundId) return { kind: "indeterminate", code: "MISSING_REFUND_ID" };
+    const match = list.find((entry) => str(entry.refundTrxId ?? entry.refundTrxID) === input.providerRefundId);
     if (!match) return { kind: "indeterminate", code: "REFUND_NOT_LISTED" };
     const amountPoisha = parseDecimalToPoisha(match.refundAmount);
     if (match.refundTransactionStatus === "Completed") {

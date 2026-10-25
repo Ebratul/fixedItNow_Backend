@@ -6,7 +6,8 @@ import {
   type ExecutionContext,
 } from "@nestjs/common";
 import type { Request } from "express";
-import { AdminGuard } from "./admin.guard.js";
+import type { Permission } from "../admin/permissions.js";
+import { PermissionGuard, REQUIRED_PERMISSIONS } from "./permission.guard.js";
 import { ApprovedWorkerGuard } from "./approved-worker.guard.js";
 import type { AuthContext, WorkerContext } from "./auth.types.js";
 
@@ -19,8 +20,12 @@ export const SKIP_ORIGIN_CHECK = "skipOriginCheck";
  */
 export const Public = () => SetMetadata(IS_PUBLIC, true);
 
-/** Route requires an ADMIN, checked against the database on every request. */
-export const RequireAdmin = () => applyDecorators(UseGuards(AdminGuard));
+/**
+ * Route requires an ADMIN holding ALL the listed permissions, read from the database on every
+ * request. Put it on a controller for a shared minimum and on a handler to ask for more.
+ */
+export const RequirePermission = (...permissions: Permission[]) =>
+  applyDecorators(SetMetadata(REQUIRED_PERMISSIONS, permissions), UseGuards(PermissionGuard));
 
 /**
  * Route requires a worker whose profile was SUBMITTED and VERIFIED by an

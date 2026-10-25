@@ -104,22 +104,28 @@ export class BookingsController {
     return this.bookings.cancel(auth, id, body.reason);
   }
 
+  @Post(":id/arrive")
+  @HttpCode(200)
+  arrive(@CurrentAuth() auth: AuthContext, @Param("id", uuid()) id: string, @Body(new ZodPipe(emptyBodySchema)) _body: unknown) {
+    return this.bookings.arrive(auth, id);
+  }
+
   @Post(":id/start")
   @HttpCode(200)
   start(@CurrentAuth() auth: AuthContext, @Param("id", uuid()) id: string, @Body(new ZodPipe(emptyBodySchema)) _body: unknown) {
     return this.bookings.start(auth, id);
   }
 
+  @Post(":id/mark-finished")
+  @HttpCode(200)
+  markFinished(@CurrentAuth() auth: AuthContext, @Param("id", uuid()) id: string, @Body(new ZodPipe(emptyBodySchema)) _body: unknown) {
+    return this.bookings.markFinished(auth, id);
+  }
+
   @Post(":id/complete")
   @HttpCode(200)
   complete(@CurrentAuth() auth: AuthContext, @Param("id", uuid()) id: string, @Body(new ZodPipe(emptyBodySchema)) _body: unknown) {
     return this.bookings.complete(auth, id);
-  }
-
-  @Post(":id/confirm-completion")
-  @HttpCode(200)
-  confirmCompletion(@CurrentAuth() auth: AuthContext, @Param("id", uuid()) id: string, @Body(new ZodPipe(emptyBodySchema)) _body: unknown) {
-    return this.bookings.confirmCompletion(auth, id);
   }
 
   // ---- quotes ----

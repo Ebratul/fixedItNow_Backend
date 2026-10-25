@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { at, bookableWorker, customer, requestBooking } from "./booking-helpers.js";
+import { at, bookableWorker, confirmedBooking, customer, payableBooking as workFinished, requestBooking } from "./booking-helpers.js";
 import { SECRET_MARKERS, TEST_ENV } from "./fake-providers.js";
 import { createTestApp, WEB_ORIGIN, type TestApp } from "./helpers.js";
 import {
   bkashCallback,
+  cancelViaDispute,
   events,
   latestBkashId,
   newKey,
@@ -11,15 +12,13 @@ import {
   pastThrottle,
   payableBooking,
   raw,
-  sslCallback,
-  sslIpn,
   startPayment,
 } from "./payment-helpers.js";
 
 /**
  * Payment initiation, verification, callbacks and consistency.
  * Provider HTTP is a MOCK (test/fake-providers.ts): these tests prove OUR logic,
- * not that bKash or SSLCOMMERZ behave like the mock (see docs/PAYMENTS.md).
+ * not that bKash behaves like the mock (see docs/PAYMENTS.md).
  */
 describe("payments", () => {
   let t: TestApp;
@@ -64,10 +63,13 @@ describe("payments", () => {
       const quote = await worker.agent.post(`${t.api}/bookings/${id}/quotes`).send({ laborBdt: 800, materialsBdt: 300, otherBdt: 50, description: "Gas refill and filter cleaning." });
       const quoteId = quote.body.quotes[0].id as string;
       await cust.agent.post(`${t.api}/bookings/${id}/quotes/${quoteId}/accept`).send({});
-      const res = await startPayment(t, cust, id, "SSLCOMMERZ");
+      t.clock.set(new Date(at(t, 3, 10).getTime() - 10 * 60_000));
+      await worker.agent.post(`${t.api}/bookings/${id}/start`).send({});
+      await worker.agent.post(`${t.api}/bookings/${id}/complete`).send({});
+      const res = await startPayment(t, cust, id, "BKASH");
       expect(res.status).toBe(201);
       expect(res.body.payment.amountBdt).toBe(1150);
-      expect(t.net.callsTo("gwprocess")[0]!.form!.total_amount).toBe("1150.00");
+      expect(t.net.callsTo("/payment/create")[0]!.json).toMatchObject({ amount: "1150.00" });
     });
 
     it("ignores nothing: client-supplied amount, currency, status or ids are rejected", async () => {
@@ -92,29 +94,45 @@ describe("payments", () => {
       expect(await t.prisma.payment.count()).toBe(0);
     });
 
-    it("only accepts payment while the booking is confirmed or later (never requested, cancelled or disputed)", async () => {
+    it("only accepts payment once the work is reported finished (never requested, confirmed, in progress, cancelled or disputed)", async () => {
       const worker = await bookableWorker(t);
       const cust = await customer(t);
+      const notPayable = async (id: string) => {
+        const r = await startPayment(t, cust, id, "BKASH");
+        expect(r.status).toBe(422);
+        expect(r.body.code).toBe("BOOKING_NOT_PAYABLE");
+      };
       const requested = await requestBooking(t, cust, worker, at(t, 3, 10));
-      const r = await startPayment(t, cust, requested.body.booking.id, "BKASH");
-      expect(r.status).toBe(422);
-      expect(r.body.code).toBe("BOOKING_NOT_PAYABLE");
+      await notPayable(requested.body.booking.id);
 
-      const { cust: c2, bookingId } = await payableBooking(t, { worker, hour: 14 });
-      await c2.agent.post(`${t.api}/bookings/${bookingId}/cancel`).send({ reason: "Plans changed completely" });
-      expect((await startPayment(t, c2, bookingId, "BKASH")).body.code).toBe("BOOKING_NOT_PAYABLE");
+      // Confirmed and in progress: the work is not finished, so nothing is due yet.
+      const start = at(t, 4, 10);
+      const confirmed = await confirmedBooking(t, cust, worker, start);
+      await notPayable(confirmed);
+      t.clock.set(new Date(start.getTime() - 10 * 60_000));
+      await worker.agent.post(`${t.api}/bookings/${confirmed}/start`).send({});
+      await notPayable(confirmed);
+      expect(await t.prisma.payment.count()).toBe(0);
 
-      const { cust: c3, bookingId: b3 } = await payableBooking(t, { worker, hour: 16 });
+      // Finished: payable.
+      await worker.agent.post(`${t.api}/bookings/${confirmed}/complete`).send({});
+      expect((await startPayment(t, cust, confirmed, "BKASH")).status).toBe(201);
+
+      const cancelled = await confirmedBooking(t, cust, worker, at(t, 6, 10));
+      await cust.agent.post(`${t.api}/bookings/${cancelled}/cancel`).send({ reason: "Plans changed completely" });
+      await notPayable(cancelled);
+
+      const { cust: c3, bookingId: b3 } = await payableBooking(t, { worker, hour: 16, days: 8 });
       await t.prisma.booking.update({ where: { id: b3 }, data: { status: "DISPUTED" } });
       expect((await startPayment(t, c3, b3, "BKASH")).body.code).toBe("BOOKING_NOT_PAYABLE");
     });
 
     it("refuses an amount outside the provider's limits and a booking without an agreed price", async () => {
       const { cust, bookingId } = await payableBooking(t);
-      await t.prisma.booking.update({ where: { id: bookingId }, data: { agreedAmountBdt: 5 } });
-      const low = await startPayment(t, cust, bookingId, "SSLCOMMERZ");
-      expect(low.status).toBe(422);
-      expect(low.body.code).toBe("AMOUNT_OUT_OF_RANGE");
+      await t.prisma.booking.update({ where: { id: bookingId }, data: { agreedAmountBdt: 3_000_001 } });
+      const high = await startPayment(t, cust, bookingId, "BKASH");
+      expect(high.status).toBe(422);
+      expect(high.body.code).toBe("AMOUNT_OUT_OF_RANGE");
       await t.prisma.booking.update({ where: { id: bookingId }, data: { agreedAmountBdt: null } });
       expect((await startPayment(t, cust, bookingId, "BKASH")).body.code).toBe("NO_AGREED_AMOUNT");
       await t.prisma.booking.update({ where: { id: bookingId }, data: { agreedAmountBdt: 500, currency: "USD" } });
@@ -133,8 +151,9 @@ describe("payments", () => {
       expect(b.body.checkoutUrl).toBe(a.body.checkoutUrl);
       expect(await t.prisma.payment.count()).toBe(1);
       expect(t.net.callsTo("/payment/create")).toHaveLength(1);
-      // The same key for another provider is a client bug, not a replay.
-      expect((await startPayment(t, cust, bookingId, "SSLCOMMERZ", key)).body.code).toBe("IDEMPOTENCY_KEY_REUSED");
+      // The same key for another booking is a client bug, not a replay.
+      const other = await payableBooking(t, { cust, hour: 14 });
+      expect((await startPayment(t, cust, other.bookingId, "BKASH", key)).body.code).toBe("IDEMPOTENCY_KEY_REUSED");
       expect((await startPayment(t, cust, bookingId, "BKASH", "short")).status).toBe(400);
     });
 
@@ -150,10 +169,10 @@ describe("payments", () => {
     it("blocks a second attempt while one is open, allows it once that one is closed", async () => {
       const { cust, bookingId } = await payableBooking(t);
       const first = await startPayment(t, cust, bookingId, "BKASH");
-      expect((await startPayment(t, cust, bookingId, "SSLCOMMERZ")).body.code).toBe("PAYMENT_IN_PROGRESS");
+      expect((await startPayment(t, cust, bookingId, "BKASH")).body.code).toBe("PAYMENT_IN_PROGRESS");
       await bkashCallback(t, first.body.payment.reference, latestBkashId(t), "cancel");
       expect(await statusOf(cust, first.body.payment.reference)).toBe("CANCELLED");
-      const second = await startPayment(t, cust, bookingId, "SSLCOMMERZ");
+      const second = await startPayment(t, cust, bookingId, "BKASH");
       expect(second.status).toBe(201);
       expect(await t.prisma.payment.count()).toBe(2); // history is kept
     });
@@ -199,7 +218,6 @@ describe("payments", () => {
         const list = await cust.agent.get(`${bare.api}/payments/providers`);
         expect(list.body.providers).toEqual([
           expect.objectContaining({ provider: "BKASH", available: false, mode: null }),
-          expect.objectContaining({ provider: "SSLCOMMERZ", available: false, mode: null }),
         ]);
         const res = await startPayment(bare, cust, booking.body.booking.id, "BKASH");
         expect(res.status).toBe(422);
@@ -210,7 +228,7 @@ describe("payments", () => {
       }
       const ok = await customer(t);
       const providers = await ok.agent.get(`${t.api}/payments/providers`);
-      expect(providers.body.providers.map((p: any) => [p.provider, p.available, p.mode])).toEqual([["BKASH", true, "sandbox"], ["SSLCOMMERZ", true, "sandbox"]]);
+      expect(providers.body.providers.map((p: any) => [p.provider, p.available, p.mode])).toEqual([["BKASH", true, "sandbox"]]);
     });
   });
 
@@ -222,7 +240,7 @@ describe("payments", () => {
       return { ...ctx, ref: res.body.payment.reference as string, paymentId: latestBkashId(t) };
     }
 
-    it("marks the payment SUCCEEDED only after execute + query confirm it, and leaves the booking lifecycle alone", async () => {
+    it("marks the payment SUCCEEDED only after execute + query confirm it, and only then completes the booking", async () => {
       const { cust, worker, bookingId, ref, paymentId } = await started();
       t.net.bkashApprove(paymentId);
       const cb = await bkashCallback(t, ref, paymentId);
@@ -236,9 +254,10 @@ describe("payments", () => {
       expect(t.net.callsTo("/query/payment").length).toBeGreaterThanOrEqual(1); // verified independently of execute
 
       const booking = await cust.agent.get(`${t.api}/bookings/${bookingId}`);
-      expect(booking.body.booking.status).toBe("CONFIRMED"); // payment is not a lifecycle transition
+      expect(booking.body.booking.status).toBe("COMPLETED"); // the verified payment is what completes a finished job
       expect(booking.body.payment).toMatchObject({ state: "PAID", canPay: false });
       expect(booking.body.events.filter((e: any) => e.type === "payment.verified")).toHaveLength(1);
+      expect(booking.body.events.filter((e: any) => e.type === "booking.completed")).toHaveLength(1);
       // The professional learns only that a verified payment exists.
       const seen = await worker.agent.get(`${t.api}/bookings/${bookingId}`);
       expect(seen.body.payment).toEqual({ state: "PAID" });
@@ -280,7 +299,7 @@ describe("payments", () => {
       expect(booking.body.payment.state).toBe("UNDER_REVIEW");
       expect(booking.body.events.some((e: any) => e.type === "payment.verified")).toBe(false);
       // No second charge while money is unaccounted for.
-      expect((await startPayment(t, cust, bookingId, "SSLCOMMERZ")).body.code).toBe("PAYMENT_UNDER_REVIEW");
+      expect((await startPayment(t, cust, bookingId, "BKASH")).body.code).toBe("PAYMENT_UNDER_REVIEW");
     });
 
     it("handles repeated and parallel callbacks exactly once", async () => {
@@ -309,8 +328,7 @@ describe("payments", () => {
 
     it("records a late success on a cancelled booking as paid-but-ineligible, without reviving the booking", async () => {
       const { cust, bookingId, ref, paymentId } = await started();
-      const cancel = await cust.agent.post(`${t.api}/bookings/${bookingId}/cancel`).send({ reason: "Plans changed completely" });
-      expect(cancel.status).toBe(200);
+      await cancelViaDispute(t, cust, bookingId); // dispute -> an administrator cancels the booking while the payment is still open
       t.net.bkashApprove(paymentId);
       await bkashCallback(t, ref, paymentId);
       const res = await paymentStatus(t, cust, ref);
@@ -374,147 +392,6 @@ describe("payments", () => {
     });
   });
 
-  // ---------------------------------------------------------------- SSLCOMMERZ
-  describe("SSLCOMMERZ verification", () => {
-    async function started() {
-      const ctx = await payableBooking(t);
-      const res = await startPayment(t, ctx.cust, ctx.bookingId, "SSLCOMMERZ");
-      return { ...ctx, ref: res.body.payment.reference as string, res };
-    }
-    const form = (ref: string, txn: { valId: string }, extra: Record<string, string> = {}) => ({ tran_id: ref, val_id: txn.valId, status: "VALID", ...extra });
-
-    it("creates a hosted session with our callback URLs and never exposes the store password", async () => {
-      const { res, ref } = await started();
-      expect(res.body.checkoutUrl).toMatch(/^https:\/\/sandbox\.sslcommerz\.com\//);
-      const sent = t.net.callsTo("gwprocess")[0]!.form!;
-      expect(sent).toMatchObject({ tran_id: ref, currency: "BDT", total_amount: "500.00" });
-      expect(sent.success_url).toBe(`${WEB_ORIGIN}/api/v1/payments/callbacks/sslcommerz/success`);
-      expect(sent.ipn_url).toBe(`${WEB_ORIGIN}/api/v1/payments/ipn/sslcommerz`);
-      expect(JSON.stringify(res.body)).not.toContain("DO-NOT-LEAK");
-    });
-
-    it("accepts a success callback only after the Validation API confirms it", async () => {
-      const { cust, ref } = await started();
-      const txn = t.net.sslPay(ref);
-      const cb = await sslCallback(t, "success", form(ref, txn));
-      expect(cb.status).toBe(303);
-      expect(cb.headers.location).toBe(`${WEB_ORIGIN}/payments/${ref}?returned=1`);
-      const res = await paymentStatus(t, cust, ref);
-      expect(res.body.payment).toMatchObject({ status: "SUCCEEDED", providerTransactionId: txn.bankTranId });
-      expect(t.net.callsTo("validationserverAPI").length).toBeGreaterThanOrEqual(1);
-    });
-
-    it("does not trust a success callback for a payment that was never made", async () => {
-      const { cust, ref } = await started();
-      const cb = await sslCallback(t, "success", { tran_id: ref, val_id: "FORGED", status: "VALID", amount: "500.00" });
-      expect(cb.status).toBe(303);
-      expect(await statusOf(cust, ref)).toBe("PROCESSING");
-      expect((await t.prisma.payment.findFirstOrThrow()).succeededAt).toBeNull();
-    });
-
-    it("ignores a val_id that belongs to a different transaction (reference substitution)", async () => {
-      const victim = await started();
-      const other = await payableBooking(t);
-      const otherRes = await startPayment(t, other.cust, other.bookingId, "SSLCOMMERZ");
-      const otherRef = otherRes.body.payment.reference as string;
-      const othersTxn = t.net.sslPay(otherRef); // a REAL, paid transaction... of someone else
-      await sslCallback(t, "success", form(victim.ref, othersTxn));
-      expect(await statusOf(victim.cust, victim.ref)).toBe("PROCESSING");
-      expect(await count("payment.callback_rejected", victim.ref)).toBe(1);
-      // ...and it did not poison the real owner of that transaction.
-      await sslCallback(t, "success", form(otherRef, othersTxn));
-      expect(await statusOf(other.cust, otherRef)).toBe("SUCCEEDED");
-    });
-
-    it("handles an IPN idempotently and answers with a fixed plain OK", async () => {
-      const { cust, ref } = await started();
-      const txn = t.net.sslPay(ref);
-      const first = await sslIpn(t, form(ref, txn));
-      expect(first.status).toBe(200);
-      expect(first.text).toBe("OK");
-      const before = (await events(t, ref)).length;
-      await Promise.all([sslIpn(t, form(ref, txn)), sslIpn(t, form(ref, txn)), sslCallback(t, "success", form(ref, txn))]);
-      expect(await statusOf(cust, ref)).toBe("SUCCEEDED");
-      expect(await count("payment.succeeded", ref)).toBe(1);
-      expect((await events(t, ref)).filter((e) => e.type === "payment.succeeded" || e.type === "payment.requires_review")).toHaveLength(1);
-      expect(await t.prisma.bookingEvent.count({ where: { type: "payment.verified" } })).toBe(1);
-      expect((await events(t, ref)).length - before).toBeLessThanOrEqual(2); // only new distinct facts, e.g. a different callback kind
-      const unknown = await sslIpn(t, { tran_id: "FIN" + "A".repeat(24), val_id: "x", status: "VALID" });
-      expect(unknown.status).toBe(200);
-      expect(unknown.text).toBe("OK");
-    });
-
-    it("recovers a lost callback by looking the transaction up by our tran_id (polls are throttled)", async () => {
-      const { cust, ref } = await started();
-      expect(await statusOf(cust, ref)).toBe("INITIATED"); // looked up: nothing paid yet
-      t.net.sslPay(ref); // paid, but no callback or IPN ever arrives
-      const lookups = t.net.callsTo("merchantTransIDvalidationAPI").length;
-      expect(await statusOf(cust, ref)).toBe("INITIATED"); // inside the throttle window: no provider call
-      expect(t.net.callsTo("merchantTransIDvalidationAPI")).toHaveLength(lookups);
-      pastThrottle(t);
-      expect(await statusOf(cust, ref)).toBe("SUCCEEDED");
-    });
-
-    it("parks a duplicate payment instead of accepting a second success for the same booking", async () => {
-      const { cust, bookingId, ref: first } = await started();
-      t.clock.advanceMinutes(31);
-      expect(await statusOf(cust, first)).toBe("EXPIRED"); // customer walked away from the first session
-      const second = await startPayment(t, cust, bookingId, "SSLCOMMERZ");
-      const secondRef = second.body.payment.reference as string;
-      await sslCallback(t, "success", form(secondRef, t.net.sslPay(secondRef)));
-      expect(await statusOf(cust, secondRef)).toBe("SUCCEEDED");
-      // ...then the customer pays the OLD session after all (SSLCOMMERZ charges at the gateway).
-      await sslCallback(t, "success", form(first, t.net.sslPay(first)));
-      expect(await statusOf(cust, first)).toBe("REQUIRES_REVIEW");
-      expect((await t.prisma.payment.findUniqueOrThrow({ where: { reference: first } })).reviewReason).toBe("DUPLICATE_PAYMENT");
-      expect(await statusOf(cust, secondRef)).toBe("SUCCEEDED");
-      expect(await t.prisma.payment.count({ where: { bookingId, status: "SUCCEEDED" } })).toBe(1);
-      expect(await t.prisma.bookingEvent.count({ where: { bookingId, type: "payment.verified" } })).toBe(1);
-    });
-
-    it("rejects mismatching amount, currency, and provider-flagged risk", async () => {
-      for (const [opts, reason] of [
-        [{ amount: "10.00" }, "AMOUNT_MISMATCH"],
-        [{ currency: "USD" }, "CURRENCY_MISMATCH"],
-        [{ risk: "1" }, "PROVIDER_RISK_FLAG"],
-      ] as const) {
-        await t.resetData();
-        const { cust, ref } = await started();
-        const txn = t.net.sslPay(ref, opts);
-        await sslCallback(t, "success", form(ref, txn));
-        expect(await statusOf(cust, ref), reason).toBe("REQUIRES_REVIEW");
-        expect((await t.prisma.payment.findFirstOrThrow()).reviewReason).toBe(reason);
-      }
-    });
-
-    it("records fail and cancel callbacks, allows a retry, and still accepts a verified late payment", async () => {
-      const { cust, bookingId, ref } = await started();
-      await sslCallback(t, "cancel", { tran_id: ref, status: "CANCELLED" });
-      expect(await statusOf(cust, ref)).toBe("CANCELLED");
-      const retry = await startPayment(t, cust, bookingId, "SSLCOMMERZ");
-      expect(retry.status).toBe(201);
-      const retryRef = retry.body.payment.reference as string;
-      await sslCallback(t, "fail", { tran_id: retryRef, status: "FAILED" });
-      expect(await statusOf(cust, retryRef)).toBe("FAILED");
-      // The customer in fact paid the first session before cancelling it.
-      const txn = t.net.sslPay(ref);
-      await sslIpn(t, form(ref, txn));
-      expect(await statusOf(cust, ref)).toBe("SUCCEEDED");
-      await sslCallback(t, "fail", { tran_id: ref, status: "FAILED" });
-      expect(await statusOf(cust, ref)).toBe("SUCCEEDED"); // never downgraded
-    });
-
-    it("keeps PROCESSING while the Validation API is down and resolves once it answers", async () => {
-      const { cust, ref } = await started();
-      const txn = t.net.sslPay(ref);
-      t.net.fail("validationserverAPI", "http500", 1);
-      await sslCallback(t, "success", form(ref, txn));
-      expect(await t.prisma.payment.findFirstOrThrow().then((p) => p.status)).toBe("PROCESSING");
-      pastThrottle(t);
-      expect(await statusOf(cust, ref)).toBe("SUCCEEDED");
-    });
-  });
-
   // ---------------------------------------------------------------- history, privacy, security
   describe("history, privacy and security", () => {
     it("keeps payment history private to its owner", async () => {
@@ -534,11 +411,12 @@ describe("payments", () => {
 
     it("never returns credentials, provider session ids, checkout URLs or database ids on read endpoints", async () => {
       const { cust, bookingId } = await payableBooking(t);
-      const res = await startPayment(t, cust, bookingId, "SSLCOMMERZ");
+      const res = await startPayment(t, cust, bookingId, "BKASH");
       const ref = res.body.payment.reference as string;
-      const txn = t.net.sslPay(ref);
-      await sslCallback(t, "success", { tran_id: ref, val_id: txn.valId, status: "VALID" });
+      t.net.bkashApprove(latestBkashId(t));
+      await bkashCallback(t, ref, latestBkashId(t));
       const row = await t.prisma.payment.findFirstOrThrow();
+      expect(row.status).toBe("SUCCEEDED");
       const bodies = [
         (await paymentStatus(t, cust, ref)).body,
         (await cust.agent.get(`${t.api}/payments`)).body,
@@ -546,7 +424,7 @@ describe("payments", () => {
         (await cust.agent.get(`${t.api}/bookings/${bookingId}`)).body,
       ].map((b) => JSON.stringify(b));
       for (const body of bodies) {
-        for (const secret of [...SECRET_MARKERS, row.id, row.providerPaymentId!, row.providerValidationId!, "checkoutUrl", "gwprocess", row.customerId]) {
+        for (const secret of [...SECRET_MARKERS, row.id, row.providerPaymentId!, "checkoutUrl", "sandbox.bka.sh/checkout", row.customerId]) {
           expect(body, `leaked ${secret}`).not.toContain(secret);
         }
       }
@@ -590,7 +468,7 @@ describe("payments", () => {
       expect(forged.status).toBe(403);
       expect(await t.prisma.payment.count()).toBe(0);
       // ...while the provider callback routes (cross-site by nature) are reachable without one.
-      expect((await sslIpn(t, { tran_id: "x" })).status).toBe(200);
+      expect((await bkashCallback(t, "FIN" + "0".repeat(24), "x")).status).toBe(303);
     });
 
     it("lets only administrators use the admin payment API", async () => {
@@ -605,9 +483,9 @@ describe("payments", () => {
 
     it("lets an administrator reconcile an unresolved payment, with an audit entry, discovering a lost success", async () => {
       const { cust, bookingId } = await payableBooking(t);
-      const res = await startPayment(t, cust, bookingId, "SSLCOMMERZ");
+      const res = await startPayment(t, cust, bookingId, "BKASH");
       const ref = res.body.payment.reference as string;
-      t.net.sslPay(ref); // paid; every notification was lost
+      t.net.bkashCompleteSilently(latestBkashId(t)); // paid at bKash; the browser callback was lost
       const admin = await t.newAdmin();
       const out = await admin.agent.post(`${t.api}/admin/payments/${ref}/reconcile`).send({});
       expect(out.status).toBe(200);
@@ -623,9 +501,8 @@ describe("payments", () => {
 
     it("re-verifies stale unresolved payments in a batch", async () => {
       const { cust, bookingId } = await payableBooking(t);
-      const res = await startPayment(t, cust, bookingId, "SSLCOMMERZ");
-      const ref = res.body.payment.reference as string;
-      t.net.sslPay(ref);
+      await startPayment(t, cust, bookingId, "BKASH");
+      t.net.bkashCompleteSilently(latestBkashId(t));
       t.clock.advanceMinutes(5);
       const admin = await t.newAdmin();
       const out = await admin.agent.post(`${t.api}/admin/payments/reconcile-stale`).send({});
@@ -635,11 +512,7 @@ describe("payments", () => {
     it("does not let an administrator reconcile a payment on a booking they take part in", async () => {
       const admin = await t.newAdmin();
       const worker = await bookableWorker(t);
-      const bookingId = await (async () => {
-        const created = await requestBooking(t, admin, worker, at(t, 3, 10));
-        await worker.agent.post(`${t.api}/bookings/${created.body.booking.id}/accept`).send({});
-        return created.body.booking.id as string;
-      })();
+      const bookingId = await workFinished(t, admin, worker);
       const res = await startPayment(t, admin, bookingId, "BKASH");
       const out = await admin.agent.post(`${t.api}/admin/payments/${res.body.payment.reference}/reconcile`).send({});
       expect(out.status).toBe(404);
@@ -647,8 +520,8 @@ describe("payments", () => {
   });
 
   it("uses a fixed set of callback routes that need no session", async () => {
+    // The removed SSLCOMMERZ endpoints no longer exist.
     expect((await raw(t).get(`${t.api}/payments/callbacks/sslcommerz/success`)).status).toBe(404);
-    expect((await raw(t).post(`${t.api}/payments/callbacks/sslcommerz/bogus`).type("form").send({})).status).toBe(404);
-    expect((await sslCallback(t, "success", {})).headers.location).toBe(`${WEB_ORIGIN}/payments`);
+    expect((await raw(t).get(`${t.api}/payments/ipn/sslcommerz`)).status).toBe(404);
   });
 });

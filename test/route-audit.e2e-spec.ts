@@ -12,11 +12,11 @@ const PUBLIC = new Set([
   "GET /api/v1/health", "GET /api/v1/health/ready", "GET /api/v1/health/live", "GET /api/v1/config/auth",
   "GET /api/v1/categories", "GET /api/v1/categories/:slug",
   "GET /api/v1/workers", "GET /api/v1/workers/:slug", "GET /api/v1/workers/:slug/availability", "GET /api/v1/workers/:slug/reviews",
-  "GET /api/v1/ai/status",
+  "GET /api/v1/ai/status", "GET /api/v1/config/platform", "GET /api/v1/announcements",
   // provider callbacks: untrusted input, verified server-to-server (see docs/PAYMENTS.md)
-  "GET /api/v1/payments/callbacks/bkash/:reference", "POST /api/v1/payments/callbacks/sslcommerz/:kind", "POST /api/v1/payments/ipn/sslcommerz",
+  "GET /api/v1/payments/callbacks/bkash/:reference",
   // service-to-service: guarded by ServiceTokenGuard (404 when unconfigured, 401 without the token)
-  "GET /api/v1/internal/ai/workers", "GET /api/v1/internal/ai/categories",
+  "GET /api/v1/internal/ai/workers", "GET /api/v1/internal/ai/categories", "GET /api/v1/internal/ai/knowledge",
 ]);
 const AUTH_PREFIX = "/api/v1/auth/"; // Better Auth owns these (its own rate limits, origin and CSRF checks)
 

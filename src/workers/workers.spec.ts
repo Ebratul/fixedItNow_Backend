@@ -15,6 +15,7 @@ describe("eligibility", () => {
     expect(isListable({ ...base, publishedAt: null })).toBe(false);
     expect(isListable({ ...base, suspendedAt: new Date() })).toBe(false);
     expect(isListable({ ...base, slug: null })).toBe(false);
+    expect(isListable({ ...base, userSuspendedAt: new Date() })).toBe(false); // the owner's account is suspended
   });
 
   it("the Prisma filter encodes the same conditions", () => {
@@ -23,6 +24,7 @@ describe("eligibility", () => {
       verificationStatus: "VERIFIED",
       publishedAt: { not: null },
       suspendedAt: null,
+      user: { suspendedAt: null },
       slug: { not: null },
     });
   });

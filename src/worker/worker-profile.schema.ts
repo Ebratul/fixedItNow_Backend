@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { DIVISIONS, LANGUAGES, MAX_WORKER_SERVICES } from "../common/constants.js";
+import { FORBIDDEN_TEXT } from "../common/user-text.js";
 import { displayNameSchema } from "../me/customer-profile.schema.js";
 
+const clean = (value: string) => !FORBIDDEN_TEXT.test(value);
 const unique = <T>(items: T[]) => new Set(items).size === items.length;
 
 export const serviceInputSchema = z
@@ -15,7 +17,7 @@ export const serviceInputSchema = z
       .max(1_000_000, "Maximum price is ৳1,000,000")
       .nullable()
       .optional(),
-    pricingNotes: z.string().trim().max(300, "Use 300 characters or fewer").nullable().optional(),
+    pricingNotes: z.string().trim().max(300, "Use 300 characters or fewer").refine(clean, "Contains unsupported characters").nullable().optional(),
   })
   .superRefine((service, ctx) => {
     const needsPrice = service.pricingModel !== "QUOTE";
@@ -33,8 +35,8 @@ export const serviceInputSchema = z
 
 const fields = {
   displayName: displayNameSchema,
-  headline: z.string().trim().max(80, "Use 80 characters or fewer").nullable(),
-  bio: z.string().trim().max(1000, "Use 1000 characters or fewer").nullable(),
+  headline: z.string().trim().max(80, "Use 80 characters or fewer").refine(clean, "Contains unsupported characters").nullable(),
+  bio: z.string().trim().max(1000, "Use 1000 characters or fewer").refine(clean, "Contains unsupported characters").nullable(),
   experienceYears: z.number().int().min(0).max(60).nullable(),
   languages: z
     .array(z.enum(LANGUAGES))

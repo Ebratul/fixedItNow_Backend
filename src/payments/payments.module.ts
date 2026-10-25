@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { BookingCore } from "../bookings/booking-core.service.js";
 import { Clock } from "../bookings/clock.js";
 import { AdminPaymentsController } from "./admin-payments.controller.js";
 import { PaymentCallbacksController } from "./payment-callbacks.controller.js";
@@ -11,7 +12,7 @@ import { RefundsService } from "./refunds.service.js";
 
 @Module({
   controllers: [PaymentsController, PaymentCallbacksController, AdminPaymentsController],
-  providers: [Clock, HttpClient, PaymentProviders, PaymentsService, PaymentCallbacksService, RefundsService],
+  providers: [Clock, BookingCore, HttpClient, PaymentProviders, PaymentsService, PaymentCallbacksService, RefundsService],
   exports: [PaymentsService],
 })
 export class PaymentsModule {}

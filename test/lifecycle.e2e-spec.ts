@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { at, bookableWorker, confirmedBooking, customer, quoteBody, requestBooking, type Person, type Worker } from "./booking-helpers.js";
+import { at, bookableWorker, confirmedBooking, customer, payBooking, quoteBody, requestBooking, type Person, type Worker } from "./booking-helpers.js";
+import { TEST_ENV } from "./fake-providers.js";
 import { createTestApp, type TestApp } from "./helpers.js";
 
 describe("booking lifecycle", () => {
   let t: TestApp;
-  beforeAll(async () => { t = await createTestApp(); });
+  beforeAll(async () => { t = await createTestApp(TEST_ENV); });
   afterAll(() => t.close());
   beforeEach(() => t.resetData());
 
@@ -13,7 +14,7 @@ describe("booking lifecycle", () => {
   const eventTypes = async (id: string) => (await t.prisma.bookingEvent.findMany({ where: { bookingId: id }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] })).map((e) => e.type);
 
   describe("happy path", () => {
-    it("request -> accept -> start -> complete -> confirm, each step explicit and audited", async () => {
+    it("request -> accept -> arrive -> start -> complete -> (verified payment) completed, each step explicit and audited", async () => {
       const w = await bookableWorker(t);
       const c = await customer(t);
       const start = at(t, 3, 10);
@@ -25,20 +26,31 @@ describe("booking lifecycle", () => {
       expect(early.status).toBe(422);
       expect(early.body.code).toBe("TOO_EARLY");
 
+      const tooEarlyToArrive = await post(w, id, "arrive");
+      expect(tooEarlyToArrive.status).toBe(422);
+      expect(tooEarlyToArrive.body.code).toBe("TOO_EARLY");
+
       t.clock.set(new Date(start.getTime() - 20 * 60_000)); // inside the 30-minute early window
+      const arrived = await post(w, id, "arrive");
+      expect(arrived.body.booking.status).toBe("CONFIRMED"); // a milestone, not a new status: the slot stays reserved
+      expect(arrived.body.booking.arrivedAt).toBeTruthy();
       expect((await post(w, id, "start")).body.booking.status).toBe("IN_PROGRESS");
       const done = await post(w, id, "complete");
       expect(done.body.booking.status).toBe("COMPLETION_PENDING");
       expect(done.body.actions).toEqual(["open_dispute"]); // only a dispute remains possible for the worker
-      const confirm = await post(c, id, "confirm-completion");
-      expect(confirm.body.booking.status).toBe("COMPLETED");
-      expect(confirm.body.booking.completedAt).toBeTruthy();
+      // The customer cannot complete it by asking: that route no longer exists. Only a verified payment does.
+      expect((await post(c, id, "confirm-completion")).status).toBe(404);
+      expect((await row(id)).status).toBe("COMPLETION_PENDING");
+      await payBooking(t, c, id);
+      const completed = (await c.agent.get(`${t.api}/bookings/${id}`)).body;
+      expect(completed.booking.status).toBe("COMPLETED");
+      expect(completed.booking.completedAt).toBeTruthy();
       expect(await eventTypes(id)).toEqual([
-        "booking.requested", "booking.accepted", "booking.started", "booking.completion_requested", "booking.completed",
+        "booking.requested", "booking.accepted", "booking.arrived", "booking.started", "booking.completion_requested", "payment.verified", "booking.completed",
       ]);
       // History is readable by both participants and carries the actors' roles.
       const hist = (await c.agent.get(`${t.api}/bookings/${id}/history`)).body.events;
-      expect(hist.map((e: any) => e.actorRole)).toEqual(["CUSTOMER", "WORKER", "WORKER", "WORKER", "CUSTOMER"]);
+      expect(hist.map((e: any) => e.actorRole)).toEqual(["CUSTOMER", "WORKER", "WORKER", "WORKER", "WORKER", "SYSTEM", "SYSTEM"]);
     });
 
     it("offers each participant only the actions that will actually succeed", async () => {
@@ -50,15 +62,17 @@ describe("booking lifecycle", () => {
       expect(await actions(c)).toEqual(["cancel"]);
       expect((await actions(w)).sort()).toEqual(["accept", "decline"]);
       await post(w, id, "accept");
-      expect((await actions(c)).sort()).toEqual(["cancel", "reschedule"]);
+      expect((await actions(c)).sort()).toEqual(["cancel", "mark_finished", "reschedule"]);
       expect((await actions(w)).sort()).toEqual(["cancel", "reschedule"]); // "start" appears only inside the window
       t.clock.set(new Date(start.getTime() - 10 * 60_000));
-      expect((await actions(w)).sort()).toEqual(["cancel", "start"]); // too close to the start to reschedule
+      expect((await actions(w)).sort()).toEqual(["arrive", "cancel", "start"]); // too close to the start to reschedule
+      await post(w, id, "arrive");
+      expect((await actions(w)).sort()).toEqual(["cancel", "start"]); // arriving twice is not offered
       await post(w, id, "start");
       expect((await actions(w)).sort()).toEqual(["complete", "open_dispute"]);
-      expect(await actions(c)).toEqual(["open_dispute"]);
+      expect((await actions(c)).sort()).toEqual(["mark_finished", "open_dispute"]);
       await post(w, id, "complete");
-      expect((await actions(c)).sort()).toEqual(["confirm_completion", "open_dispute"]);
+      expect(await actions(c)).toEqual(["open_dispute"]); // paying is not an action: the payment section offers it
     });
   });
 
@@ -78,8 +92,9 @@ describe("booking lifecycle", () => {
       await post(w, id, "start");
       expect((await post(c, id, "complete")).status).toBe(403);
       await post(w, id, "complete");
-      expect((await post(w, id, "confirm-completion")).status).toBe(403); // the worker cannot confirm their own work
-      expect((await post(other, id, "confirm-completion")).status).toBe(404);
+      // Nobody can complete the booking by asking (the old customer "confirm" route is gone); only payment does.
+      for (const who of [c, w, other]) expect((await post(who, id, "confirm-completion")).status).toBe(404);
+      expect((await post(c, id, "arrive")).status).toBe(403);
       expect((await row(id)).status).toBe("COMPLETION_PENDING");
     });
 
@@ -99,7 +114,6 @@ describe("booking lifecycle", () => {
   describe("invalid transitions are rejected with a consistent 409", () => {
     it.each([
       ["complete before start", "CONFIRMED", "worker", "complete"],
-      ["confirm completion before the worker reports it", "CONFIRMED", "customer", "confirm-completion"],
       ["accept an already confirmed booking", "CONFIRMED", "worker", "accept"],
       ["decline a confirmed booking (use cancel)", "CONFIRMED", "worker", "decline"],
     ])("%s", async (_n, _s, who, action) => {
@@ -120,7 +134,7 @@ describe("booking lifecycle", () => {
       expect((await post(c, id, "cancel", { reason: "Changed my mind" })).body.booking.status).toBe("CANCELLED");
       t.clock.set(new Date(start.getTime() - 10 * 60_000));
       for (const [who, action, body] of [
-        [w, "start", {}], [w, "accept", {}], [w, "complete", {}], [c, "confirm-completion", {}],
+        [w, "start", {}], [w, "arrive", {}], [w, "accept", {}], [w, "complete", {}],
         [c, "cancel", { reason: "again again" }], [w, "cancel", { reason: "also cancelling" }], [c, "reschedule", { newStartAt: at(t, 4, 10).toISOString() }],
       ] as const) {
         const res = await post(who, id, action, body);
@@ -137,8 +151,8 @@ describe("booking lifecycle", () => {
       t.clock.set(start);
       await post(w, id, "start");
       await post(w, id, "complete");
-      await post(c, id, "confirm-completion");
-      for (const [who, action, body] of [[c, "cancel", { reason: "too late now" }], [w, "cancel", { reason: "too late now" }], [w, "start", {}], [c, "confirm-completion", {}]] as const) {
+      await payBooking(t, c, id);
+      for (const [who, action, body] of [[c, "cancel", { reason: "too late now" }], [w, "cancel", { reason: "too late now" }], [w, "start", {}], [w, "arrive", {}], [w, "complete", {}]] as const) {
         expect((await post(who, id, action, body)).status).toBe(409);
       }
       expect((await row(id)).status).toBe("COMPLETED");
@@ -311,6 +325,24 @@ describe("booking lifecycle", () => {
       const events = (await w.agent.get(`${t.api}/bookings/${id}/history`)).body.events;
       expect(events.map((e: any) => [e.fromStatus, e.toStatus])).toEqual([[null, "REQUESTED"], ["REQUESTED", "CONFIRMED"]]);
       expect(JSON.stringify(events)).not.toMatch(/actorUserId|userId/);
+    });
+
+    it("when it exceeds the 200-entry cap it drops the OLDEST entries, never the latest action, and stays oldest-first", async () => {
+      const w = await bookableWorker(t);
+      const c = await customer(t);
+      const id = await confirmedBooking(t, c, w, at(t, 3, 10));
+      const base = Date.now() + 60_000;
+      await t.prisma.bookingEvent.createMany({
+        data: Array.from({ length: 210 }, (_, i) => ({
+          bookingId: id, actorRole: "CUSTOMER" as const, type: `filler.${String(i).padStart(3, "0")}`, createdAt: new Date(base + i * 1000),
+        })),
+      });
+      const events = (await c.agent.get(`${t.api}/bookings/${id}/history`)).body.events;
+      expect(events).toHaveLength(200);
+      expect(events.at(-1).type).toBe("filler.209"); // the newest is kept
+      expect(events[0].type).toBe("filler.010"); // the oldest 12 (incl. the real transitions) are what fell off
+      const times = events.map((e: any) => Date.parse(e.createdAt));
+      expect(times).toEqual([...times].sort((x, y) => x - y)); // chronological
     });
   });
 });

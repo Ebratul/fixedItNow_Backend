@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { customer, type Person } from "./booking-helpers.js";
 import { TEST_ENV } from "./fake-providers.js";
 import { createTestApp, type TestApp } from "./helpers.js";
-import { bkashCallback, events, latestBkashId, newKey, paymentStatus, payableBooking, sslCallback, startPayment, pastThrottle } from "./payment-helpers.js";
+import { bkashCallback, cancelViaDispute, events, latestBkashId, newKey, paymentStatus, payableBooking, startPayment, pastThrottle } from "./payment-helpers.js";
 
 /** Refund workflow against the MOCKED provider (see test/fake-providers.ts). */
 describe("refunds", () => {
@@ -19,24 +19,16 @@ describe("refunds", () => {
 
   const REASON = "I cancelled this booking and want my money back.";
 
-  /** A verified payment (bKash by default) on a booking that is then cancelled. */
-  async function paidAndCancelled(provider: "BKASH" | "SSLCOMMERZ" = "BKASH", cancel = true) {
+  /** A verified bKash payment on a booking that is then cancelled (the only route now: a dispute whose outcome is a cancellation). */
+  async function paidAndCancelled(cancel = true) {
     const ctx = await payableBooking(t);
-    const res = await startPayment(t, ctx.cust, ctx.bookingId, provider);
+    const res = await startPayment(t, ctx.cust, ctx.bookingId, "BKASH");
     const ref = res.body.payment.reference as string;
-    if (provider === "BKASH") {
-      const id = latestBkashId(t);
-      t.net.bkashApprove(id);
-      await bkashCallback(t, ref, id);
-    } else {
-      const txn = t.net.sslPay(ref);
-      await sslCallback(t, "success", { tran_id: ref, val_id: txn.valId, status: "VALID" });
-    }
+    const id = latestBkashId(t);
+    t.net.bkashApprove(id);
+    await bkashCallback(t, ref, id);
     expect((await paymentStatus(t, ctx.cust, ref)).body.payment.status).toBe("SUCCEEDED");
-    if (cancel) {
-      const c = await ctx.cust.agent.post(`${t.api}/bookings/${ctx.bookingId}/cancel`).send({ reason: "Plans changed completely" });
-      expect(c.status).toBe(200);
-    }
+    if (cancel) await cancelViaDispute(t, ctx.cust, ctx.bookingId);
     return { ...ctx, ref };
   }
 
@@ -46,7 +38,9 @@ describe("refunds", () => {
     return r.send(body);
   };
   const admin = async () => t.newAdmin();
-  const act = (a: Person, id: string, action: string, body: object = {}) => a.agent.post(`${t.api}/admin/refunds/${id}/${action}`).send(body);
+  // approve and process move money, so the API demands an explicit confirmation (reject does not).
+  const act = (a: Person, id: string, action: string, body: object = {}) =>
+    a.agent.post(`${t.api}/admin/refunds/${id}/${action}`).send(action === "approve" || action === "process" ? { confirm: true, ...body } : body);
   const payment = (ref: string) => t.prisma.payment.findUniqueOrThrow({ where: { reference: ref } });
 
   describe("requests", () => {
@@ -64,18 +58,18 @@ describe("refunds", () => {
     });
 
     it("refuses when the booking is not cancelled, the payment is not verified, or it is someone else's", async () => {
-      const live = await paidAndCancelled("BKASH", false);
+      const live = await paidAndCancelled(false);
       const r = await request(live.cust, live.ref);
       expect(r.status).toBe(422);
       expect(r.body.code).toBe("REFUND_NOT_ELIGIBLE");
 
       const unpaid = await payableBooking(t, { hour: 15 });
       const started = await startPayment(t, unpaid.cust, unpaid.bookingId, "BKASH");
-      await unpaid.cust.agent.post(`${t.api}/bookings/${unpaid.bookingId}/cancel`).send({ reason: "Plans changed completely" });
+      await cancelViaDispute(t, unpaid.cust, unpaid.bookingId);
       const u = await request(unpaid.cust, started.body.payment.reference);
       expect(u.body.code).toBe("PAYMENT_NOT_REFUNDABLE");
 
-      const { ref } = await paidAndCancelled("SSLCOMMERZ");
+      const { ref } = await paidAndCancelled();
       const stranger = await customer(t);
       expect((await request(stranger, ref)).status).toBe(404);
       expect((await t.client().post(`${t.api}/payments/${ref}/refunds`).send({ reason: REASON })).status).toBe(401);
@@ -103,7 +97,7 @@ describe("refunds", () => {
       expect((await request(cust, ref)).body.code).toBe("REFUND_IN_PROGRESS");
       expect(await t.prisma.refund.count()).toBe(1);
 
-      const fresh = await paidAndCancelled("SSLCOMMERZ");
+      const fresh = await paidAndCancelled();
       const results = await Promise.all(Array.from({ length: 6 }, () => request(fresh.cust, fresh.ref)));
       expect(results.filter((r) => r.status === 201)).toHaveLength(1);
       expect(results.filter((r) => r.status === 409).every((r) => r.body.code === "REFUND_IN_PROGRESS")).toBe(true);
@@ -163,15 +157,15 @@ describe("refunds", () => {
       const id = latestBkashId(t);
       t.net.bkashApprove(id);
       await bkashCallback(t, ref, id);
-      await a.agent.post(`${t.api}/bookings/${ctx.bookingId}/cancel`).send({ reason: "Plans changed completely" });
+      await cancelViaDispute(t, a, ctx.bookingId);
       const refund = (await request(a, ref)).body.refund;
       expect((await act(a, refund.id, "approve")).status).toBe(404);
     });
   });
 
   describe("provider processing", () => {
-    async function approved(provider: "BKASH" | "SSLCOMMERZ" = "BKASH", amountBdt?: number) {
-      const ctx = await paidAndCancelled(provider);
+    async function approved(amountBdt?: number) {
+      const ctx = await paidAndCancelled();
       const refund = (await request(ctx.cust, ctx.ref, amountBdt ? { reason: REASON, amountBdt } : { reason: REASON })).body.refund;
       const a = await admin();
       await act(a, refund.id, "approve");
@@ -194,16 +188,6 @@ describe("refunds", () => {
       expect(t.net.callsTo("/refund/payment/transaction")).toHaveLength(1);
     });
 
-    it("refunds through SSLCOMMERZ using the bank transaction id, confirmed by the refund-status API", async () => {
-      const { ref, refund, a } = await approved("SSLCOMMERZ");
-      const res = await act(a, refund.id, "process");
-      expect(res.body.refund.status).toBe("SUCCEEDED");
-      const call = t.net.callsTo("merchantTransIDvalidationAPI").find((c) => c.query.bank_tran_id)!;
-      expect(call.query).toMatchObject({ refund_amount: "500.00", refund_remarks: expect.any(String) });
-      expect(call.query.refund_trans_id).toMatch(/^RFD[0-9A-F]{24}$/);
-      expect(await payment(ref)).toMatchObject({ status: "REFUNDED", refundedAmountBdt: 500 });
-    });
-
     it("keeps a provider-accepted refund PROCESSING until the provider confirms completion", async () => {
       const { ref, refund, a } = await approved();
       t.net.bkashRefundsComplete = false;
@@ -216,17 +200,6 @@ describe("refunds", () => {
       await act(a, refund.id, "reconcile"); // idempotent
       expect(await payment(ref)).toMatchObject({ status: "REFUNDED", refundedAmountBdt: 500 });
       expect(await t.prisma.paymentEvent.count({ where: { type: "refund.succeeded" } })).toBe(1);
-    });
-
-    it("does not mark SSLCOMMERZ refunds successful while processing, and fails them when cancelled", async () => {
-      const { ref, refund, a } = await approved("SSLCOMMERZ");
-      t.net.sslRefundsComplete = false;
-      expect((await act(a, refund.id, "process")).body.refund.status).toBe("PROCESSING");
-      expect(await payment(ref)).toMatchObject({ status: "SUCCEEDED", refundedAmountBdt: 0 });
-      const row = await t.prisma.refund.findUniqueOrThrow({ where: { id: refund.id } });
-      t.net.sslRefunds.get(row.providerRefundId!)!.status = "cancelled";
-      expect((await act(a, refund.id, "reconcile")).body.refund.status).toBe("FAILED");
-      expect(await payment(ref)).toMatchObject({ status: "SUCCEEDED", refundedAmountBdt: 0 });
     });
 
     it("does not resend an unanswered refund (a retry could refund twice) and does not call it failed", async () => {
@@ -256,7 +229,7 @@ describe("refunds", () => {
     });
 
     it("supports partial refunds and never exceeds the remaining amount", async () => {
-      const { cust, ref, refund, a } = await approved("BKASH", 200);
+      const { cust, ref, refund, a } = await approved(200);
       await act(a, refund.id, "process");
       expect(await payment(ref)).toMatchObject({ status: "PARTIALLY_REFUNDED", refundedAmountBdt: 200 });
       expect((await paymentStatus(t, cust, ref)).body.payment.refundableAmountBdt).toBe(300);
@@ -279,11 +252,11 @@ describe("refunds", () => {
         const id = latestBkashId(off);
         off.net.bkashApprove(id);
         await bkashCallback(off, ref, id);
-        await ctx.cust.agent.post(`${off.api}/bookings/${ctx.bookingId}/cancel`).send({ reason: "Plans changed completely" });
+        await cancelViaDispute(off, ctx.cust, ctx.bookingId);
         const refund = (await ctx.cust.agent.post(`${off.api}/payments/${ref}/refunds`).send({ reason: REASON })).body.refund;
         const a = await off.newAdmin();
-        await a.agent.post(`${off.api}/admin/refunds/${refund.id}/approve`).send({});
-        const out = await a.agent.post(`${off.api}/admin/refunds/${refund.id}/process`).send({});
+        await a.agent.post(`${off.api}/admin/refunds/${refund.id}/approve`).send({ confirm: true });
+        const out = await a.agent.post(`${off.api}/admin/refunds/${refund.id}/process`).send({ confirm: true });
         expect(out.status).toBe(422);
         expect(out.body.code).toBe("REFUNDS_NOT_SUPPORTED");
         expect(off.net.callsTo("/refund/")).toHaveLength(0);
@@ -306,18 +279,24 @@ describe("refunds", () => {
   describe("administrator-initiated refunds", () => {
     it("can refund a verified duplicate payment, but not an unexplained review item", async () => {
       const ctx = await payableBooking(t);
-      const first = await startPayment(t, ctx.cust, ctx.bookingId, "SSLCOMMERZ");
+      const first = await startPayment(t, ctx.cust, ctx.bookingId, "BKASH");
       const firstRef = first.body.payment.reference as string;
+      const firstId = latestBkashId(t);
       t.clock.advanceMinutes(31);
       await paymentStatus(t, ctx.cust, firstRef); // expires
-      const second = await startPayment(t, ctx.cust, ctx.bookingId, "SSLCOMMERZ");
+      const second = await startPayment(t, ctx.cust, ctx.bookingId, "BKASH");
       const secondRef = second.body.payment.reference as string;
-      await sslCallback(t, "success", { tran_id: secondRef, val_id: t.net.sslPay(secondRef).valId, status: "VALID" });
-      await sslCallback(t, "success", { tran_id: firstRef, val_id: t.net.sslPay(firstRef).valId, status: "VALID" });
+      const secondId = latestBkashId(t);
+      t.net.bkashApprove(secondId);
+      await bkashCallback(t, secondRef, secondId);
+      // ...then it turns out the customer also paid the OLD session; an administrator reconciles it.
+      t.net.bkashCompleteSilently(firstId);
+      const reviewer = await admin();
+      await reviewer.agent.post(`${t.api}/admin/payments/${firstRef}/reconcile`).send({});
       expect((await payment(firstRef)).reviewReason).toBe("DUPLICATE_PAYMENT");
 
       const a = await admin();
-      const created = await a.agent.post(`${t.api}/admin/payments/${firstRef}/refunds`).set("Idempotency-Key", newKey()).send({ reason: "Duplicate payment for the same booking" });
+      const created = await a.agent.post(`${t.api}/admin/payments/${firstRef}/refunds`).set("Idempotency-Key", newKey()).send({ reason: "Duplicate payment for the same booking", confirm: true });
       expect(created.status).toBe(201);
       expect(created.body.refund).toMatchObject({ status: "APPROVED", approvedAmountBdt: 500 });
       const done = await act(a, created.body.refund.id, "process");
@@ -327,10 +306,11 @@ describe("refunds", () => {
 
       // An amount-mismatch review item is NOT refundable through this API.
       const other = await payableBooking(t, { hour: 15 });
-      const m = await startPayment(t, other.cust, other.bookingId, "SSLCOMMERZ");
+      const m = await startPayment(t, other.cust, other.bookingId, "BKASH");
       const mRef = m.body.payment.reference as string;
-      await sslCallback(t, "success", { tran_id: mRef, val_id: t.net.sslPay(mRef, { amount: "10.00" }).valId, status: "VALID" });
-      const bad = await a.agent.post(`${t.api}/admin/payments/${mRef}/refunds`).send({ reason: "Trying to refund a mismatch" });
+      t.net.bkashApprove(latestBkashId(t), { amount: "10.00" });
+      await bkashCallback(t, mRef, latestBkashId(t));
+      const bad = await a.agent.post(`${t.api}/admin/payments/${mRef}/refunds`).send({ reason: "Trying to refund a mismatch", confirm: true });
       expect(bad.status).toBe(422);
       expect(bad.body.code).toBe("PAYMENT_NOT_REFUNDABLE");
       expect(await events(t, firstRef, "refund.requested")).toHaveLength(1);

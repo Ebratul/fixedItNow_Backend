@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { at, bookableWorker, confirmedBooking, customer, requestBooking, type Person, type Worker } from "./booking-helpers.js";
+import { at, bookableWorker, confirmedBooking, customer, payBooking, requestBooking, type Person, type Worker } from "./booking-helpers.js";
+import { TEST_ENV } from "./fake-providers.js";
 import { createTestApp, type TestApp } from "./helpers.js";
 
 describe("disputes", () => {
   let t: TestApp;
-  beforeAll(async () => { t = await createTestApp(); });
+  beforeAll(async () => { t = await createTestApp(TEST_ENV); });
   afterAll(() => t.close());
   beforeEach(() => t.resetData());
 
@@ -24,7 +25,7 @@ describe("disputes", () => {
     t.clock.set(start);
     await w.agent.post(`${t.api}/bookings/${id}/start`).send({});
     if (stage !== "in_progress") await w.agent.post(`${t.api}/bookings/${id}/complete`).send({});
-    if (stage === "completed") await c.agent.post(`${t.api}/bookings/${id}/confirm-completion`).send({});
+    if (stage === "completed") await payBooking(t, c, id); // a verified payment is what completes a booking
     return { w, c, id };
   }
   const disputed = async (stage: "in_progress" | "pending" | "completed" = "completed") => {
@@ -104,7 +105,7 @@ describe("disputes", () => {
     it("a disputed booking cannot be silently completed, cancelled or restarted by either party", async () => {
       const { w, c, id } = await disputed("pending");
       for (const [who, action, body] of [
-        [c, "confirm-completion", {}], [w, "complete", {}], [w, "start", {}],
+        [w, "complete", {}], [w, "start", {}], [w, "arrive", {}],
         [c, "cancel", { reason: "Trying to cancel anyway" }], [w, "cancel", { reason: "Trying to cancel anyway" }],
       ] as const) {
         expect((await who.agent.post(`${t.api}/bookings/${id}/${action}`).send(body)).status, action).toBe(409);
@@ -274,6 +275,28 @@ describe("disputes", () => {
       expect((await t.prisma.dispute.findUniqueOrThrow({ where: { id: disputeId } })).status).toBe("UNDER_REVIEW");
       // The admin can still choose another outcome.
       expect((await adminPost(a, disputeId, "resolve", { outcome: "MARK_COMPLETED", resolution: "Marking it completed instead." })).status).toBe(200);
+    });
+
+    it("a disputed booking keeps holding its slot: a pending request for the same time cannot be accepted meanwhile", async () => {
+      const w = await bookableWorker(t);
+      const c1 = await customer(t);
+      const c2 = await customer(t);
+      const start = at(t, 3, 10);
+      // c2's request is only REQUESTED (it reserves nothing), then c1's overlapping booking is confirmed.
+      const pending = await requestBooking(t, c2, w, start);
+      expect(pending.status).toBe(201);
+      const first = await confirmedBooking(t, c1, w, start);
+      t.clock.set(new Date(start.getTime() - 20 * 60_000)); // starting is allowed 30 min early; c2's request has not expired yet
+      expect((await w.agent.post(`${t.api}/bookings/${first}/start`).send({})).status).toBe(200);
+      expect((await open(c1, first)).status).toBe(200);
+      // Before the fix the worker could accept here, and the dispute could then never be withdrawn or restored.
+      const accept = await w.agent.post(`${t.api}/bookings/${pending.body.booking.id}/accept`).send({});
+      expect(accept.status).toBe(409);
+      expect(accept.body.code).toBe("SLOT_UNAVAILABLE");
+      // ...and the dispute can still be withdrawn, returning the first booking to progress.
+      const withdraw = await c1.agent.post(`${t.api}/bookings/${first}/dispute/withdraw`).send({});
+      expect(withdraw.status).toBe(200);
+      expect((await row(first)).status).toBe("IN_PROGRESS");
     });
 
     it("does not leak emails or account identifiers to admins", async () => {
