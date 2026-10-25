@@ -8,3 +8,6 @@ node_modules
 /dist
 *.tsbuildinfo
 staging.env
+.vercel
+.env.local
+/bundle
