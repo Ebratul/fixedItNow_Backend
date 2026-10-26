@@ -4,7 +4,10 @@ import { Public } from "../auth/decorators.js";
 import { ENV, type Env } from "../config/env.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
-const DB_CHECK_TIMEOUT_MS = 2_000;
+// On Vercel a fresh function instance opens its first database connection inside this check, and the pooled Prisma
+// Postgres endpoint sometimes needs more than 2 s for that, which reported a healthy API as "Not ready". Ordinary
+// requests wait for the connection, so the probe should too, while staying well inside the function's 30 s limit.
+const DB_CHECK_TIMEOUT_MS = 8_000;
 
 @Controller()
 export class HealthController {
