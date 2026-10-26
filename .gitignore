@@ -11,3 +11,4 @@ staging.env
 .vercel
 .env.local
 /bundle
+.env*
