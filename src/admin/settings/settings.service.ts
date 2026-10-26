@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import type { AuthContext } from "../../auth/auth.types.js";
-import { conflict } from "../../bookings/domain-errors.js";
+import { conflict, forbidden } from "../../bookings/domain-errors.js";
+import { DEMO_KEYS, demoRoleOf, demoSettingKey } from "../../demo/demo.config.js";
 import { PrismaService } from "../../prisma/prisma.service.js";
 import { BadRequestException } from "@nestjs/common";
 import { AuditService } from "../audit/audit.service.js";
@@ -57,11 +58,12 @@ export class SettingsService {
     };
   }
 
-  async list() {
+  /** `viewer` is the signed-in admin: a demo administrator never sees the demo-access switches (they are not theirs to see). */
+  async list(viewer?: Pick<AuthContext, "demo">) {
     const rows = await this.prisma.platformSetting.findMany();
     const stored = new Map(rows.map((r) => [r.key, r]));
     const values = await this.load();
-    return SETTING_KEYS.map((key) => {
+    return SETTING_KEYS.filter((key) => !(viewer?.demo && key.startsWith("demo."))).map((key) => {
       const def = SETTINGS[key];
       const row = stored.get(key);
       return {
@@ -80,6 +82,9 @@ export class SettingsService {
   }
 
   async update(admin: AuthContext, key: string, value: unknown, reason: string) {
+    // Defence in depth: the demo administrator holds no settings.manage and is read-only, but the demo-access switches
+    // must also be out of reach of anything that ever reaches this method as a demo account.
+    if (admin.demo) throw forbidden("DEMO_READ_ONLY", "The demo administrator cannot change settings.");
     if (!isSettingKey(key)) throw new BadRequestException("Unknown setting");
     const parsed = SETTINGS[key].schema.safeParse(value);
     if (!parsed.success) {
@@ -110,6 +115,16 @@ export class SettingsService {
       });
     });
     this.invalidate();
+    // Switching a demo role off signs out every open demo session of that role straight away (the authentication guard
+    // refuses them anyway; this just removes the rows). Hiding an option changes nothing about sessions.
+    const role = DEMO_KEYS.find((k) => key === demoSettingKey(k, "enabled"));
+    if (role && parsed.data === false) {
+      const { count } = await this.prisma.unscoped.session.deleteMany({ where: { user: { demoRole: demoRoleOf(role) } } });
+      await this.audit.record(this.prisma, {
+        actorId: admin.userId, action: "demo.sessions_end", targetType: "PlatformSetting", targetId: key,
+        metadata: { role, signedOutVisitors: count, reason },
+      });
+    }
     return (await this.list()).find((s) => s.key === key)!;
   }
 }

@@ -7,8 +7,11 @@ import type { PaymentProvider } from "../../generated/prisma/client.js";
  * stored attempt (reference, amount, currency, provider ids) and owns all state.
  */
 
-/** The only payment provider. (The database enum still lists SSLCOMMERZ for historical rows; nothing creates them.) */
-export type ProviderId = "BKASH";
+/**
+ * The real payment provider (bKash) and the simulated one that only demo accounts can use (docs/DEMO.md).
+ * (The database enum still lists SSLCOMMERZ for historical rows; nothing creates them.)
+ */
+export type ProviderId = "BKASH" | "DEMO";
 
 export type InitiateInput = {
   /** Our opaque reference; sent as the provider's transaction/invoice id. */

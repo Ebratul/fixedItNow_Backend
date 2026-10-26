@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { AuthContext } from "../auth/auth.types.js";
-import { expandPermissions } from "../admin/permissions.js";
+import { demoKeyOf } from "../demo/demo.config.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { CustomerProfileInput } from "./customer-profile.schema.js";
 
@@ -48,7 +48,8 @@ export class MeService {
         emailVerified: true,
         image: true,
         role: true,
-        adminRole: { select: { key: true, name: true, permissions: true } },
+        demoRole: true,
+        adminRole: { select: { key: true, name: true } },
         customerProfile: {
           select: { displayName: true, preferredDivision: true },
         },
@@ -56,15 +57,18 @@ export class MeService {
       },
     });
 
-    const { role, adminRole, customerProfile, workerProfile, ...account } = user;
+    const { role, demoRole, adminRole, customerProfile, workerProfile, ...account } = user;
     return {
       user: account,
       isAdmin: role === "ADMIN",
-      // Shown so the admin UI can hide what the server would refuse. The server decides, every time.
+      // Shown so the admin UI can hide what the server would refuse. The server decides, every time. These are the
+      // EFFECTIVE permissions from the authentication guard (for the demo administrator: the read-only allow-list).
       admin:
         role === "ADMIN"
-          ? { role: adminRole ? { key: adminRole.key, name: adminRole.name } : null, permissions: adminRole ? [...expandPermissions(adminRole.permissions)] : [] }
+          ? { role: adminRole ? { key: adminRole.key, name: adminRole.name } : null, permissions: adminRole ? [...auth.permissions] : [] }
           : null,
+      // Non-null only for the public demo identities: the web app shows its "Demo mode" bar from this.
+      demo: demoRole ? { role: demoKeyOf(demoRole) } : null,
       customer: customerProfile ? { onboarded: true, profile: customerProfile } : { onboarded: false },
       worker: workerProfile
         ? {

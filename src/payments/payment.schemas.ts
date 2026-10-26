@@ -5,7 +5,11 @@ const text = (min: number, max: number, label: string) =>
   z.string().trim().min(min, `${label} must be at least ${min} characters`).max(max, `${label} must be ${max} characters or fewer`);
 
 /** The browser chooses a METHOD only. Amount, currency, customer and status are server-side; unknown keys are rejected. */
-export const initiatePaymentSchema = z.strictObject({ provider: z.enum(["BKASH"]) });
+export const initiatePaymentSchema = z.strictObject({ provider: z.enum(["BKASH", "DEMO"]) });
+
+/** What a demo customer picks on the simulated checkout page. It decides a SIMULATED payment only (see PaymentsService.simulateDemoOutcome). */
+export const demoOutcomeSchema = z.strictObject({ outcome: z.enum(["success", "failed", "cancelled"]) });
+export type DemoOutcomeInput = z.infer<typeof demoOutcomeSchema>;
 export type InitiatePaymentInput = z.infer<typeof initiatePaymentSchema>;
 
 const pagination = {
@@ -40,7 +44,7 @@ const PAYMENT_STATUSES = [
 ] as const;
 export const adminPaymentsQuerySchema = z.object({
   status: z.enum(PAYMENT_STATUSES).optional(),
-  provider: z.enum(["BKASH"]).optional(),
+  provider: z.enum(["BKASH", "DEMO"]).optional(),
   /** Matches the payment reference, or the booking id when a full id is pasted. */
   q: z.string().trim().min(3).max(64).optional(),
   from: z.coerce.date().optional(),

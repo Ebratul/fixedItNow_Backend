@@ -81,7 +81,7 @@ export async function createTestApp(overrides: Record<string, string> = {}, fake
     );
     // Admin roles: keep super_admin (created by the migration) and the seeded starting roles at their
     // defaults; drop anything a test created. Categories created by tests are removed too.
-    await prisma.adminRole.deleteMany({ where: { key: { notIn: ["super_admin", ...DEFAULT_ROLES.map((r) => r.key)] } } });
+    await prisma.adminRole.deleteMany({ where: { key: { notIn: ["super_admin", "demo_admin", ...DEFAULT_ROLES.map((r) => r.key)] } } });
     for (const role of DEFAULT_ROLES) await prisma.adminRole.updateMany({ where: { key: role.key }, data: { name: role.name, description: role.description, permissions: role.permissions } });
     app.get(SettingsService).invalidate();
     mail.outbox.length = 0;

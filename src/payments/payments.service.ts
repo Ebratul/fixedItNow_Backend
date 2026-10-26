@@ -83,6 +83,10 @@ export class PaymentsService {
    * come from the database.
    */
   async initiate(auth: AuthContext, bookingId: string, provider: ProviderId, idempotencyKey: string | undefined) {
+    // A demo account only ever pays with the simulation (and nobody else can): see PaymentProviders.get.
+    if (auth.demo && provider !== "DEMO") {
+      throw unprocessable("DEMO_SIMULATED_ONLY", "In the demo, payments are simulated. Choose “Simulated payment”.");
+    }
     const adapter = this.providers.get(provider);
     if (!adapter) {
       throw unprocessable("PROVIDER_UNAVAILABLE", "That payment method is not available right now. Please choose another one.");
@@ -201,7 +205,8 @@ export class PaymentsService {
     } catch {
       result = { kind: "unreachable" as const, code: "ERROR" };
     }
-    if (result.kind === "ok" && !isAllowedCheckoutUrl(result.checkoutUrl, adapter.checkoutHostSuffixes)) {
+    // The simulated provider's checkout is this web app's own page; every real provider's URL must be on its own hosts.
+    if (result.kind === "ok" && adapter.id !== "DEMO" && !isAllowedCheckoutUrl(result.checkoutUrl, adapter.checkoutHostSuffixes)) {
       result = { kind: "rejected" as const, code: "BAD_CHECKOUT_URL" };
     }
 
@@ -236,6 +241,36 @@ export class PaymentsService {
       });
     }
     return { payment: presentPayment(final), checkoutUrl: final.checkoutUrl, created: true };
+  }
+
+  /**
+   * The simulated checkout (demo accounts only). The customer picks how the SIMULATED payment ends; the result is applied
+   * through applyVerification, the same state machine and booking gate as a real payment, with a verification built
+   * entirely from the stored attempt (never from the request). It can only touch a DEMO-provider payment of the caller's
+   * own, which only exists in the demo realm, so it can never settle a real booking or payment.
+   */
+  async simulateDemoOutcome(auth: AuthContext, reference: string, outcome: "success" | "failed" | "cancelled") {
+    if (!auth.demo) throw new NotFoundException("Payment not found");
+    const p = await this.prisma.payment.findUnique({ where: { reference } });
+    if (!p || p.customerId !== auth.userId || p.provider !== "DEMO") throw new NotFoundException("Payment not found");
+    if (p.status !== "INITIATED" && p.status !== "PROCESSING") {
+      throw conflict("NOT_AWAITING_OUTCOME", "This simulated payment is not waiting for an outcome.");
+    }
+    const verification: Verification =
+      outcome === "success"
+        ? {
+            kind: "completed",
+            reference: p.reference,
+            providerPaymentId: p.providerPaymentId,
+            providerTransactionId: `DEMO-${p.reference}`,
+            providerValidationId: null,
+            amountPoisha: p.amountBdt * 100,
+            currency: p.currency,
+            riskFlagged: false,
+          }
+        : { kind: "not_completed", state: outcome };
+    await this.applyVerification(p.id, verification, { actor: { userId: auth.userId, role: "CUSTOMER" }, source: "demo_simulation" });
+    return this.getForCustomer(auth, reference);
   }
 
   private urlsFor(adapter: PaymentProviderAdapter, reference: string) {

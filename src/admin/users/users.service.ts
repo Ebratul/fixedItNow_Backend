@@ -5,6 +5,7 @@ import type { Prisma } from "../../generated/prisma/client.js";
 import { PrismaService } from "../../prisma/prisma.service.js";
 import { canActOnRole, heldPermissions, isLastSuperAdminError } from "../access.js";
 import { AuditService } from "../audit/audit.service.js";
+import { DEMO_ROLE_KEY } from "../../demo/demo.config.js";
 import { expandPermissions, isSubset, SUPER_ADMIN_KEY } from "../permissions.js";
 
 export type UserListQuery = {
@@ -164,6 +165,8 @@ export class UsersService {
         }
         const role = await tx.adminRole.findUnique({ where: { id: roleId }, select: { id: true, key: true, name: true, permissions: true, isSystem: true } });
         if (!role) throw new NotFoundException("Role not found");
+        // The demo administrator's role belongs to the public demo identity alone (the database refuses it elsewhere too).
+        if (role.key === DEMO_ROLE_KEY) throw forbidden("DEMO_ROLE", "This role is reserved for the demo administrator");
         if (!canActOnRole(admin, actorKey, role)) {
           throw forbidden("ROLE_TOO_POWERFUL", "You can only assign roles whose permissions you hold yourself");
         }

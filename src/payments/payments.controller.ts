@@ -18,7 +18,7 @@ import type { Response } from "express";
 import type { AuthContext } from "../auth/auth.types.js";
 import { CurrentAuth } from "../auth/decorators.js";
 import { ZodPipe } from "../common/zod.pipe.js";
-import { IDEMPOTENCY_KEY, initiatePaymentSchema, listPaymentsSchema, refundRequestSchema, type InitiatePaymentInput } from "./payment.schemas.js";
+import { IDEMPOTENCY_KEY, demoOutcomeSchema, initiatePaymentSchema, listPaymentsSchema, refundRequestSchema, type DemoOutcomeInput, type InitiatePaymentInput } from "./payment.schemas.js";
 import { REFERENCE_PATTERN } from "./payment-callbacks.service.js";
 import { PaymentsService } from "./payments.service.js";
 import { RefundsService } from "./refunds.service.js";
@@ -77,6 +77,18 @@ export class PaymentsController {
   @Get("payments/:reference")
   detail(@CurrentAuth() auth: AuthContext, @Param("reference", new ReferencePipe()) reference: string) {
     return this.payments.getForCustomer(auth, reference);
+  }
+
+  /** Simulated checkout for demo accounts. Everyone else gets the same 404 as for a payment that does not exist. */
+  @Post("payments/:reference/demo-outcome")
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  demoOutcome(
+    @CurrentAuth() auth: AuthContext,
+    @Param("reference", new ReferencePipe()) reference: string,
+    @Body(new ZodPipe(demoOutcomeSchema)) body: DemoOutcomeInput,
+  ) {
+    return this.payments.simulateDemoOutcome(auth, reference, body.outcome);
   }
 
   @Post("payments/:reference/refunds")

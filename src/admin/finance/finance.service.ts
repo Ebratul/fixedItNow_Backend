@@ -1,5 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import type { AuthContext } from "../../auth/auth.types.js";
+import { currentRealm } from "../../common/request-context.js";
+import { Prisma } from "../../generated/prisma/client.js";
 import { PrismaService } from "../../prisma/prisma.service.js";
 import { AuditService } from "../audit/audit.service.js";
 import { SettingsService } from "../settings/settings.service.js";
@@ -28,7 +30,16 @@ export class FinanceService {
     private readonly audit: AuditService,
   ) {}
 
+  /**
+   * Raw SQL is not filtered by the realm firewall, so each report names the realm itself: only the customers of the
+   * caller's realm (demo or real), so demo payments never reach real revenue figures and real ones never reach a demo screen.
+   */
+  private realmCustomers() {
+    return Prisma.sql`SELECT "id" FROM "user" WHERE "isDemo" = ${currentRealm() === "demo"}`;
+  }
+
   private async daily({ from, to }: Range): Promise<DayRow[]> {
+    const customers = this.realmCustomers();
     return this.prisma.$queryRaw<DayRow[]>`
       WITH days AS (
         SELECT generate_series(
@@ -40,12 +51,14 @@ export class FinanceService {
         SELECT date_trunc('day', "succeededAt" AT TIME ZONE 'Asia/Dhaka') AS d, SUM("amountBdt")::int AS amount
         FROM "payment"
         WHERE "status"::text = ANY(${[...COLLECTED]}) AND "succeededAt" >= ${from} AND "succeededAt" < ${to}
+          AND "customerId" IN (${customers})
         GROUP BY 1
       ),
       refunded AS (
         SELECT date_trunc('day', "completedAt" AT TIME ZONE 'Asia/Dhaka') AS d, SUM(COALESCE("approvedAmountBdt", 0))::int AS amount
         FROM "refund"
         WHERE "status" = 'SUCCEEDED' AND "completedAt" >= ${from} AND "completedAt" < ${to}
+          AND "paymentId" IN (SELECT "id" FROM "payment" WHERE "customerId" IN (${customers}))
         GROUP BY 1
       )
       SELECT to_char(days.d, 'YYYY-MM-DD') AS day, COALESCE(paid.amount, 0)::int AS collected, COALESCE(refunded.amount, 0)::int AS refunded
@@ -54,6 +67,7 @@ export class FinanceService {
   }
 
   async summary(range: Range) {
+    const customers = this.realmCustomers();
     const [days, byProvider, byStatus, byCategory, pending] = await Promise.all([
       this.daily(range),
       this.prisma.payment.groupBy({
@@ -65,6 +79,7 @@ export class FinanceService {
         SELECT c."name" AS name, SUM(p."amountBdt")::int AS collected, COUNT(*)::int AS payments
         FROM "payment" p JOIN "booking" b ON b."id" = p."bookingId" JOIN "service_category" c ON c."id" = b."categoryId"
         WHERE p."status"::text = ANY(${[...COLLECTED]}) AND p."succeededAt" >= ${range.from} AND p."succeededAt" < ${range.to}
+          AND p."customerId" IN (${customers})
         GROUP BY c."name" ORDER BY collected DESC LIMIT 20`,
       this.prisma.refund.aggregate({ where: { status: { in: ["REQUESTED", "APPROVED", "PROCESSING"] } }, _count: { _all: true }, _sum: { requestedAmountBdt: true } }),
     ]);

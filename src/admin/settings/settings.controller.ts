@@ -24,8 +24,8 @@ export class SettingsController {
 
   @RequirePermission("settings.read")
   @Get("admin/settings")
-  async list() {
-    return { settings: await this.settings.list() };
+  async list(@CurrentAuth() auth: AuthContext) {
+    return { settings: await this.settings.list(auth) };
   }
 
   @RequirePermission("settings.manage")

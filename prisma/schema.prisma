@@ -24,6 +24,14 @@ enum UserRole {
   ADMIN
 }
 
+/// Which of the three public "Explore Demo" identities a demo account is. Only these three users can be signed in
+/// without credentials (docs/DEMO.md). Null for every ordinary account.
+enum DemoRole {
+  CUSTOMER
+  WORKER
+  ADMIN
+}
+
 enum OnboardingStatus {
   DRAFT
   SUBMITTED
@@ -67,6 +75,12 @@ model User {
   /// every authenticated request is refused while set.
   suspendedAt      DateTime?
   suspensionReason String?
+  /// Demo realm membership (docs/DEMO.md). Set once at creation and immutable (trigger). Demo users, and every record
+  /// they own, are invisible to ordinary users and vice versa: PrismaService filters on this column for every request.
+  isDemo   Boolean   @default(false)
+  /// The public "Explore Demo" login identity (at most one user per role, unique). Implies isDemo (CHECK). Never set
+  /// together with a credential account: demo accounts have no password.
+  demoRole DemoRole? @unique
 
   sessions         Session[]
   accounts         Account[]
@@ -103,6 +117,7 @@ model User {
 
   @@index([role])
   @@index([createdAt])
+  @@index([isDemo])
   @@map("user")
 }
 
@@ -626,6 +641,9 @@ model DisputeMessage {
 enum PaymentProvider {
   BKASH
   SSLCOMMERZ
+  /// Simulated payments for demo accounts only. Never contacts a provider and never moves money; a trigger keeps it
+  /// away from ordinary users and keeps demo users away from real providers (docs/DEMO.md).
+  DEMO
 }
 
 enum PaymentStatus {

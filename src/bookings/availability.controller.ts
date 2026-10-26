@@ -1,7 +1,7 @@
 import { BadRequestException, Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
 import type { AuthContext } from "../auth/auth.types.js";
-import { CurrentAuth, Public } from "../auth/decorators.js";
+import { CurrentAuth, OptionalAuth, Public } from "../auth/decorators.js";
 import { ZodPipe } from "../common/zod.pipe.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { isValidSlug } from "../workers/slug.js";
@@ -53,8 +53,9 @@ export class AvailabilityController {
     return this.availability.removeTimeOff(await this.ownProfileId(auth), id);
   }
 
-  /** Public: bookable start times. Customer-agnostic; reveals no booking details. */
+  /** Public: bookable start times. Customer-agnostic; reveals no booking details. (OptionalAuth only picks the data realm.) */
   @Public()
+  @OptionalAuth()
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Get("workers/:slug/availability")
   async publicSlots(@Param("slug") slug: string, @Query(new ZodPipe(availabilityQuerySchema)) query: { from?: string; days: number; duration: number }) {

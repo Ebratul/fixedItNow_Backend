@@ -1,5 +1,6 @@
 import { Controller, Get, NotFoundException, Param } from "@nestjs/common";
-import { Public } from "../auth/decorators.js";
+import { OptionalAuth, Public } from "../auth/decorators.js";
+import { currentRealm } from "../common/request-context.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { ELIGIBLE_WORKER } from "../workers/eligibility.js";
@@ -14,23 +15,32 @@ import { ELIGIBLE_WORKER } from "../workers/eligibility.js";
 export class CategoriesController {
   constructor(private readonly prisma: PrismaService) {}
 
-  private readonly base = {
-    slug: true,
-    name: true,
-    description: true,
-    // Real count of publicly visible workers in this category.
-    _count: { select: { workerServices: { where: { workerProfile: ELIGIBLE_WORKER } } } },
-  } as const;
+  /**
+   * Categories are shared by both data realms, but the worker COUNTS are not: a nested `_count` is not filtered by the realm
+   * firewall (docs/DEMO.md), so it names the realm itself. A demo visitor counts demo professionals, everyone else real ones.
+   */
+  private base() {
+    return {
+      slug: true,
+      name: true,
+      description: true,
+      // Real count of publicly visible workers in this category.
+      _count: { select: { workerServices: { where: { workerProfile: { ...ELIGIBLE_WORKER, user: { suspendedAt: null, isDemo: currentRealm() === "demo" } } } } } },
+    } as const;
+  }
 
-  private readonly childSelect = {
-    where: { isActive: true },
-    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-    select: this.base,
-  } satisfies Prisma.ServiceCategory$childrenArgs;
+  private childSelect() {
+    return {
+      where: { isActive: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      select: this.base(),
+    } satisfies Prisma.ServiceCategory$childrenArgs;
+  }
 
   /** Distinct visible workers with a service in this parent or any of its active subcategories. */
   private async parentCounts(slugs: string[]) {
     if (slugs.length === 0) return new Map<string, number>();
+    const demo = currentRealm() === "demo";
     const rows = await this.prisma.$queryRaw<{ slug: string; workers: number }[]>`
       SELECT p."slug" AS slug, COUNT(DISTINCT ws."workerProfileId")::int AS workers
       FROM "service_category" p
@@ -41,18 +51,20 @@ export class CategoriesController {
       WHERE p."slug" = ANY(${slugs}) AND p."isActive"
         AND wp."onboardingStatus" = 'SUBMITTED' AND wp."verificationStatus" = 'VERIFIED'
         AND wp."publishedAt" IS NOT NULL AND wp."suspendedAt" IS NULL AND wp."slug" IS NOT NULL AND u."suspendedAt" IS NULL
+        AND u."isDemo" = ${demo}
       GROUP BY p."slug"`;
     return new Map(rows.map((r) => [r.slug, r.workers]));
   }
 
   /** Active top-level categories with their active subcategories and COMPUTED counts of listed professionals. */
   @Public()
+  @OptionalAuth()
   @Get()
   async list() {
     const rows = await this.prisma.serviceCategory.findMany({
       where: { isActive: true, parentId: null },
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-      select: { ...this.base, children: this.childSelect },
+      select: { ...this.base(), children: this.childSelect() },
     });
     const counts = await this.parentCounts(rows.map((r) => r.slug));
     return {
@@ -65,12 +77,13 @@ export class CategoriesController {
   }
 
   @Public()
+  @OptionalAuth()
   @Get(":slug")
   async get(@Param("slug") slug: string) {
     const row = /^[a-z0-9-]{1,50}$/.test(slug)
       ? await this.prisma.serviceCategory.findFirst({
           where: { slug, isActive: true },
-          select: { ...this.base, parent: { select: { slug: true, name: true, isActive: true } }, children: this.childSelect },
+          select: { ...this.base(), parent: { select: { slug: true, name: true, isActive: true } }, children: this.childSelect() },
         })
       : null;
     if (!row || (row.parent && !row.parent.isActive)) throw new NotFoundException("Category not found");

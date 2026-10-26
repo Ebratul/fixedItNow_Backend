@@ -1,4 +1,4 @@
-import type { UserRole, VerificationStatus, OnboardingStatus } from "../generated/prisma/enums.js";
+import type { DemoRole, UserRole, VerificationStatus, OnboardingStatus } from "../generated/prisma/enums.js";
 
 /** Identity established from a verified session cookie. */
 export type AuthContext = {
@@ -11,6 +11,11 @@ export type AuthContext = {
   role: UserRole;
   /** Effective admin permissions (empty for non-admins and for admins without a role). From the database. */
   permissions: readonly string[];
+  /**
+   * Which public demo identity this is, or null for an ordinary account. From the database, like the role. A demo
+   * request runs in the demo realm (see common/request-context.ts) and is subject to DemoGuard.
+   */
+  demo: DemoRole | null;
 };
 
 export type WorkerContext = {

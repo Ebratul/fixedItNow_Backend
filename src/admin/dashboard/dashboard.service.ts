@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { AuthContext } from "../../auth/auth.types.js";
+import { currentRealm } from "../../common/request-context.js";
 import { PrismaService } from "../../prisma/prisma.service.js";
 
 type Point = { date: string; value: number };
@@ -14,20 +15,25 @@ type Point = { date: string; value: number };
 export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
+  // Raw SQL is not filtered by the realm firewall (docs/DEMO.md), so every series names the realm itself: a demo
+  // administrator charts demo data, a real one never counts a demo account or booking.
   private series(table: "user" | "booking", column: "createdAt", days: number): Promise<Point[]> {
+    const realm = table === "user" ? `AND t."isDemo" = $2` : `AND t."customerId" IN (SELECT "id" FROM "user" WHERE "isDemo" = $2)`;
     // Identifiers are fixed literals chosen above, never user input.
     return this.prisma.$queryRawUnsafe<Point[]>(
       `WITH d AS (
          SELECT generate_series(date_trunc('day', (now() AT TIME ZONE 'Asia/Dhaka')) - ($1::int - 1) * interval '1 day', date_trunc('day', now() AT TIME ZONE 'Asia/Dhaka'), interval '1 day') AS day
        )
        SELECT to_char(d.day, 'YYYY-MM-DD') AS date, COUNT(t."id")::int AS value
-       FROM d LEFT JOIN "${table}" t ON date_trunc('day', t."${column}" AT TIME ZONE 'Asia/Dhaka') = d.day
+       FROM d LEFT JOIN "${table}" t ON date_trunc('day', t."${column}" AT TIME ZONE 'Asia/Dhaka') = d.day ${realm}
        GROUP BY d.day ORDER BY d.day`,
       days,
+      currentRealm() === "demo",
     );
   }
 
   private collected(days: number): Promise<Point[]> {
+    const demo = currentRealm() === "demo";
     return this.prisma.$queryRaw<Point[]>`
       WITH d AS (
         SELECT generate_series(date_trunc('day', (now() AT TIME ZONE 'Asia/Dhaka')) - (${days}::int - 1) * interval '1 day', date_trunc('day', now() AT TIME ZONE 'Asia/Dhaka'), interval '1 day') AS day
@@ -35,6 +41,7 @@ export class DashboardService {
       SELECT to_char(d.day, 'YYYY-MM-DD') AS date, COALESCE(SUM(p."amountBdt"), 0)::int AS value
       FROM d LEFT JOIN "payment" p
         ON date_trunc('day', p."succeededAt" AT TIME ZONE 'Asia/Dhaka') = d.day AND p."status"::text IN ('SUCCEEDED', 'PARTIALLY_REFUNDED', 'REFUNDED')
+        AND p."customerId" IN (SELECT "id" FROM "user" WHERE "isDemo" = ${demo})
       GROUP BY d.day ORDER BY d.day`;
   }
 

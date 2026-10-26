@@ -1,11 +1,13 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { emailOTP } from "better-auth/plugins";
 import { readSetting } from "../admin/settings/read-setting.js";
 import type { Env } from "../config/env.js";
+import { isDemoEmail } from "../demo/demo.config.js";
 import type { MailService } from "../mail/mail.service.js";
 import type { PrismaService } from "../prisma/prisma.service.js";
+import { DEMO_SIGN_IN_PATH, demoLogin } from "./demo-login.plugin.js";
 import {
   OTP_LENGTH,
   OTP_MAX_ATTEMPTS,
@@ -27,6 +29,14 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 /**
+ * The only Better Auth routes a DEMO session may call. Everything else on the account (change password or email, link a
+ * provider, delete the account, update the profile) is refused so a demo account can never gain credentials or turn into
+ * an ordinary one; listing or revoking sessions is refused because the demo identities are shared and those calls would
+ * reveal or end OTHER visitors' sessions.
+ */
+const DEMO_SESSION_ALLOWED = new Set(["/get-session", "/sign-out", "/list-accounts", DEMO_SIGN_IN_PATH]);
+
+/**
  * Builds the Better Auth instance. Better Auth owns: password hashing (scrypt),
  * session cookies, email-verification and reset tokens, Google OAuth (state +
  * PKCE), CSRF/origin checks, and auth-endpoint rate limiting. FixedItNow code
@@ -34,13 +44,15 @@ const DAY = 24 * HOUR;
  */
 export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
   const production = env.NODE_ENV === "production";
+  // Authentication looks users up across both data realms (docs/DEMO.md): it must find the demo identities too.
+  const db = prisma.unscoped;
 
   return betterAuth({
     appName: "FixedItNow",
     baseURL: env.BETTER_AUTH_URL,
     basePath: AUTH_BASE_PATH,
     secret: env.BETTER_AUTH_SECRET,
-    database: prismaAdapter(prisma, { provider: "postgresql" }),
+    database: prismaAdapter(db, { provider: "postgresql" }),
 
     // Origin check for cookie-authenticated requests and redirect allow-list
     // for callbackURL / redirectTo / errorCallbackURL.
@@ -98,6 +110,7 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
     },
 
     plugins: [
+      demoLogin(prisma, env.frontendOrigin),
       emailOTP({
         otpLength: OTP_LENGTH,
         expiresIn: OTP_TTL_SECONDS,
@@ -148,6 +161,22 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
         const body = (ctx.body ?? {}) as Record<string, unknown>;
+
+        // (-1) Demo accounts (docs/DEMO.md). They have no password and their addresses cannot receive mail, so no
+        // credential flow ever applies to them: reset and code requests answer like an unknown address (nothing is
+        // sent), everything else that names one is refused. A signed-in DEMO session may only call the few routes in
+        // DEMO_SESSION_ALLOWED, so it cannot change credentials, link a provider or touch other visitors' sessions.
+        if (typeof body.email === "string" && isDemoEmail(body.email)) {
+          if (ctx.path === "/request-password-reset") return ctx.json({ status: true, message: "If this email exists in our system, check your email for the reset link" });
+          if (ctx.path === "/email-otp/send-verification-otp") return ctx.json({ success: true });
+          throw new APIError("FORBIDDEN", { message: "This is a demo account. Use “Continue as …” in the Explore Demo section of the login page.", code: "DEMO_ACCOUNT" });
+        }
+        if (!DEMO_SESSION_ALLOWED.has(ctx.path) && ctx.headers?.get("cookie")) {
+          const current = await getSessionFromCtx(ctx, { disableRefresh: true }).catch(() => null);
+          if (current && (await db.user.findUnique({ where: { id: current.user.id }, select: { isDemo: true } }))?.isDemo) {
+            throw new APIError("FORBIDDEN", { message: "This isn't available in the demo. Log out of the demo to use your own account.", code: "DEMO_RESTRICTED" });
+          }
+        }
 
         // (0) Registration can be closed by an administrator (platform setting). Existing users still sign in.
         if (ctx.path === "/sign-up/email" && !(await readSetting(prisma, "platform.registrationsOpen"))) {
@@ -211,7 +240,7 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
           // Runs only AFTER the credentials were accepted, so refusing here reveals nothing to someone
           // who does not know the password. A suspended account gets no new session.
           before: async (session) => {
-            const user = await prisma.user.findUnique({ where: { id: session.userId }, select: { suspendedAt: true } });
+            const user = await db.user.findUnique({ where: { id: session.userId }, select: { suspendedAt: true } });
             if (user?.suspendedAt) {
               throw new APIError("FORBIDDEN", { message: "This account has been suspended. Please contact support.", code: "ACCOUNT_SUSPENDED" });
             }
@@ -280,6 +309,8 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
         // Per client IP; the per-ADDRESS cooldown and hourly cap are enforced separately (hooks.before).
         "/email-otp/send-verification-otp": { window: 10 * MINUTE, max: 6 },
         "/email-otp/verify-email": { window: 10 * MINUTE, max: 15 },
+        // Public and credential-free, so the tightest per-IP budget; a global per-role session cap sits behind it.
+        [DEMO_SIGN_IN_PATH]: { window: MINUTE, max: 10 },
       },
     },
 

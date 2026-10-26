@@ -27,6 +27,8 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "admin:grant": "tsx scripts/grant-admin.ts",
+    "demo:seed": "tsx scripts/demo-seed.ts",
+    "demo:reset": "tsx scripts/demo-reset.ts",
     "kb:import": "tsx scripts/import-knowledge.ts",
     "prebuild": "prisma generate",
     "postinstall": "prisma generate",

@@ -5,6 +5,8 @@ import { AdminModule } from "./admin/admin.module.js";
 import { MaintenanceGuard } from "./admin/maintenance.guard.js";
 import { AiModule } from "./ai/ai.module.js";
 import { CommunityModule } from "./community/community.module.js";
+import { DemoGuard } from "./demo/demo.guard.js";
+import { DemoModule } from "./demo/demo.module.js";
 import { ReviewsModule } from "./reviews/reviews.module.js";
 import { AuthGuard } from "./auth/auth.guard.js";
 import { AuthModule } from "./auth/auth.module.js";
@@ -41,6 +43,7 @@ import { WorkerProfileService } from "./worker/worker-profile.service.js";
     AiModule,
     ReviewsModule,
     CommunityModule,
+    DemoModule,
     ThrottlerModule.forRootAsync({
       inject: [ENV],
       useFactory: (env: Env) => ({
@@ -70,6 +73,8 @@ import { WorkerProfileService } from "./worker/worker-profile.service.js";
     { provide: APP_GUARD, useClass: OriginGuard },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
+    // After authentication: the rules for demo sessions (read-only demo admin, per-role limits, write budget).
+    { provide: APP_GUARD, useClass: DemoGuard },
     // After authentication: maintenance mode refuses non-admin writes.
     { provide: APP_GUARD, useClass: MaintenanceGuard },
   ],

@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
 import type { AuthContext } from "../auth/auth.types.js";
-import { CurrentAuth, Public } from "../auth/decorators.js";
+import { CurrentAuth, OptionalAuth, Public } from "../auth/decorators.js";
 import { ZodPipe } from "../common/zod.pipe.js";
 import {
   createReviewSchema,
@@ -51,6 +51,7 @@ export class ReviewsController {
 
   /** Public; never returns per-viewer data. */
   @Public()
+  @OptionalAuth()
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Get("workers/:slug/reviews")
   forWorker(@Param("slug") slug: string, @Query(new ZodPipe(reviewListQuery)) query: { page: number; pageSize: number }) {

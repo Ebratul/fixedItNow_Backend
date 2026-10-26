@@ -13,6 +13,8 @@ const PUBLIC = new Set([
   "GET /api/v1/categories", "GET /api/v1/categories/:slug",
   "GET /api/v1/workers", "GET /api/v1/workers/:slug", "GET /api/v1/workers/:slug/availability", "GET /api/v1/workers/:slug/reviews",
   "GET /api/v1/ai/status", "GET /api/v1/config/platform", "GET /api/v1/announcements",
+  // the login page's view of the demo options: only what an administrator made visible (docs/DEMO.md)
+  "GET /api/v1/demo/options",
   // provider callbacks: untrusted input, verified server-to-server (see docs/PAYMENTS.md)
   "GET /api/v1/payments/callbacks/bkash/:reference",
   // service-to-service: guarded by ServiceTokenGuard (404 when unconfigured, 401 without the token)

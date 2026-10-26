@@ -48,7 +48,7 @@ export function presentPayment(
     reference: p.reference,
     bookingId: p.bookingId,
     provider: p.provider,
-    mode: p.isLive ? ("live" as const) : ("sandbox" as const),
+    mode: p.provider === "DEMO" ? ("simulated" as const) : p.isLive ? ("live" as const) : ("sandbox" as const),
     status: p.status,
     amountBdt: p.amountBdt,
     currency: p.currency,

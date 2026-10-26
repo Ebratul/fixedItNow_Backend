@@ -3,10 +3,21 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import pg from "pg";
 import { ENV, type Env } from "../config/env.js";
 import { PrismaClient } from "../generated/prisma/client.js";
+import { realmFirewall } from "./realm.js";
 
-/** Single shared Prisma client using the pg driver adapter. */
+/**
+ * Single shared Prisma client using the pg driver adapter.
+ *
+ * What Nest injects is the client WITH the realm firewall (src/prisma/realm.ts): every query is limited to the
+ * current request's realm, so demo accounts and ordinary accounts can never see each other's rows. `unscoped` is the
+ * same connection pool without the firewall; use it only where a request must look across realms by design
+ * (authentication itself, the demo seed/reset, and tests).
+ */
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleDestroy {
+  /** The same client without the realm firewall. Deliberately awkward to reach for: see the class comment. */
+  declare readonly unscoped: PrismaClient;
+
   constructor(@Inject(ENV) env: Env) {
     const pool = new pg.Pool({
       connectionString: env.DATABASE_URL,
@@ -50,6 +61,11 @@ export class PrismaService extends PrismaClient implements OnModuleDestroy {
       // can exceed on its first request, failing it with P2028. Wait as long as the connect timeout instead.
       transactionOptions: { maxWait: env.DATABASE_CONNECT_TIMEOUT_MS, timeout: env.DATABASE_STATEMENT_TIMEOUT_MS },
     });
+    // Returning an object from a constructor replaces the instance: the injected service IS the firewalled client
+    // (it keeps this class's methods through the prototype chain, so onModuleDestroy below still runs).
+    const scoped = this.$extends(realmFirewall());
+    Object.defineProperty(scoped, "unscoped", { value: this as PrismaClient, enumerable: false });
+    return scoped as unknown as PrismaService;
   }
 
   async onModuleDestroy() {

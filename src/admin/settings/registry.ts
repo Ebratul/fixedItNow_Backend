@@ -12,7 +12,7 @@ import { FORBIDDEN_TEXT } from "../../common/user-text.js";
 export type SettingDefinition<T = unknown> = {
   schema: z.ZodType<T>;
   default: T;
-  group: "Platform" | "Workers" | "Finance" | "AI";
+  group: "Platform" | "Workers" | "Finance" | "AI" | "Demo access";
   label: string;
   description: string;
   /** Where the value is used (shown to admins so they know what changing it does). */
@@ -22,6 +22,28 @@ export type SettingDefinition<T = unknown> = {
 };
 
 const def = <T>(d: SettingDefinition<T>) => d;
+
+/**
+ * The two independent switches of one public demo option (docs/DEMO.md). They are never `public`: the login page reads
+ * them through GET /demo/options, which exposes nothing but the visible options and whether each can be started.
+ *   visible  - may the option be LISTED on the login page?
+ *   enabled  - may the backend START a new demo session for this role? (the real gate: a hidden role is still
+ *              reachable by a direct request while enabled, and a disabled role is refused whether visible or not)
+ * Both default to off: demo access is opt-in, and the demo administrator is privileged.
+ */
+const demoSwitch = (name: string, field: "visible" | "enabled") =>
+  def({
+    schema: z.boolean(),
+    default: false,
+    group: "Demo access",
+    label: field === "visible" ? `${name}: show on the login page` : `${name}: allow new demo sessions`,
+    description:
+      field === "visible"
+        ? `Whether the “${name}” option is listed in the Explore Demo section of the login page. Hiding it does not stop the backend from starting demo sessions while “allow new demo sessions” is on.`
+        : `Whether the backend starts new “${name}” sessions. Turning it off refuses new sessions straight away (even for a hidden option or a direct request) and signs out every demo session of this role that is open now.`,
+    effect: field === "visible" ? "GET /demo/options (login page)." : "POST /auth/demo/sign-in, and every request made with an existing demo session of this role.",
+    public: false,
+  });
 
 export const SETTINGS = {
   "platform.maintenanceMode": def({
@@ -69,6 +91,12 @@ export const SETTINGS = {
     effect: "Default rate for GET /admin/finance/commission.",
     public: false,
   }),
+  "demo.customer.visible": demoSwitch("Demo Customer", "visible"),
+  "demo.customer.enabled": demoSwitch("Demo Customer", "enabled"),
+  "demo.worker.visible": demoSwitch("Demo Worker", "visible"),
+  "demo.worker.enabled": demoSwitch("Demo Worker", "enabled"),
+  "demo.admin.visible": demoSwitch("Demo Admin", "visible"),
+  "demo.admin.enabled": demoSwitch("Demo Admin", "enabled"),
   "ai.assistantEnabled": def({
     schema: z.boolean(),
     default: true,

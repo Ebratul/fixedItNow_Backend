@@ -12,6 +12,7 @@ import { ApprovedWorkerGuard } from "./approved-worker.guard.js";
 import type { AuthContext, WorkerContext } from "./auth.types.js";
 
 export const IS_PUBLIC = "isPublic";
+export const OPTIONAL_AUTH = "optionalAuth";
 export const SKIP_ORIGIN_CHECK = "skipOriginCheck";
 
 /**
@@ -19,6 +20,13 @@ export const SKIP_ORIGIN_CHECK = "skipOriginCheck";
  * default (global AuthGuard), so forgetting a decorator fails closed.
  */
 export const Public = () => SetMetadata(IS_PUBLIC, true);
+
+/**
+ * On a @Public() route: look at the session cookie anyway, WITHOUT requiring one, so the handler runs in the right
+ * data realm (a demo visitor browsing the directory sees the demo professionals, everyone else the real ones). It
+ * never rejects a request and never grants anything: an invalid, expired or missing session is just "anonymous".
+ */
+export const OptionalAuth = () => SetMetadata(OPTIONAL_AUTH, true);
 
 /**
  * Route requires an ADMIN holding ALL the listed permissions, read from the database on every
