@@ -58,7 +58,7 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
       resetPasswordTokenExpiresIn: HOUR,
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url }) => {
-        void mail.send({
+        mail.sendInBackground({
           kind: "reset-password",
           to: user.email,
           subject: "Reset your FixedItNow password",
@@ -74,7 +74,7 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
       },
       // Tell the real owner instead of the (possibly malicious) requester.
       onExistingUserSignUp: async ({ user }) => {
-        void mail.send({
+        mail.sendInBackground({
           kind: "account-notice",
           to: user.email,
           subject: "Someone tried to sign up with your email",
@@ -126,7 +126,7 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
               expiresAt: live?.expiresAt ?? new Date(Date.now() + HOUR * 1000),
             });
           }
-          void mail.send({
+          mail.sendInBackground({
             kind: "verify-otp",
             to: email,
             subject: `${otp} is your FixedItNow verification code`,

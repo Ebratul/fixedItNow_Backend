@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
+import { waitUntil } from "@vercel/functions";
 import { createTransport, type Transporter } from "nodemailer";
 import { ENV, type Env } from "../config/env.js";
 
@@ -19,7 +20,9 @@ export type MailMessage = {
  *   a developer can click them. Refused in production by env validation.
  *
  * Callers must NOT await `send` in request paths (timing side channel); it
- * never throws.
+ * never throws. Use `sendInBackground` there: on a serverless host (Vercel) the
+ * function is frozen as soon as the response is written, so a bare un-awaited
+ * `send` would silently never reach the SMTP server.
  */
 @Injectable()
 export class MailService {
@@ -30,6 +33,11 @@ export class MailService {
 
   constructor(@Inject(ENV) private readonly env: Env) {
     if (env.MAIL_TRANSPORT === "smtp") {
+      // Misconfiguration that has bitten before (credentials pasted into each other's variable): say so at start-up
+      // instead of at the first failed login. Names only, never values.
+      if (env.SMTP_PASS?.includes("@") && !env.SMTP_USER?.includes("@")) {
+        this.logger.warn("SMTP_USER does not look like an address but SMTP_PASS does: the two may be swapped");
+      }
       this.transporter = createTransport({
         host: env.SMTP_HOST,
         port: env.SMTP_PORT,
@@ -40,6 +48,19 @@ export class MailService {
         greetingTimeout: 10_000,
         socketTimeout: 20_000,
       });
+    }
+  }
+
+  /**
+   * Fire-and-forget that survives serverless freezing: the response is not delayed (no timing side channel), and the
+   * platform keeps the function alive until the send settles (`waitUntil`; a no-op outside Vercel).
+   */
+  sendInBackground(message: MailMessage): void {
+    const pending = this.send(message);
+    try {
+      waitUntil(pending);
+    } catch {
+      // not on a platform that supports it: a long-running server finishes the promise on its own
     }
   }
 

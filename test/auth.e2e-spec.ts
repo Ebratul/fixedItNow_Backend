@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestApp, PASSWORD, uniqueEmail, WEB_ORIGIN, type TestApp } from "./helpers.js";
 
 describe("authentication", () => {
@@ -149,6 +149,20 @@ describe("authentication", () => {
       expect(known.status).toBe(unknown.status);
       expect(known.body).toEqual(unknown.body);
       expect(t.mail.outbox.filter((m) => m.kind === "reset-password")).toHaveLength(1);
+    });
+
+    it("hands the reset and verification emails to the background sender, so a serverless function cannot freeze before delivery", async () => {
+      const email = uniqueEmail();
+      const spy = vi.spyOn(t.mail, "sendInBackground");
+      try {
+        await t.signUpAndLogin(email);
+        await t.client().post(`${t.api}/auth/request-password-reset`).send({ email, redirectTo: "/reset-password" });
+        const kinds = spy.mock.calls.map(([m]) => m.kind);
+        expect(kinds).toContain("verify-otp");
+        expect(kinds).toContain("reset-password");
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it("resets the password, revokes existing sessions, and the token works once", async () => {
