@@ -7,12 +7,15 @@ import { normalizeEmail } from "../../auth/otp.js";
 import { AuditService } from "../audit/audit.service.js";
 import { SUPER_ADMIN_KEY } from "../permissions.js";
 
+/** Hard-coded administrator that is always set up at startup, whatever the env says. */
+export const BUILT_IN_ADMIN = { email: "admin@rentnest.com", password: "admin123" } as const;
+
 /**
- * Creates the administrator named by ADMIN_EMAIL / ADMIN_PASSWORD at startup, so the first admin can
- * sign in on /admin without a manual database step. The env file is the source of truth for that
- * account: its email is marked verified, it gets the super_admin role, and its password is
- * (re)set when it does not match. Does nothing when the variables are unset. A failure is logged and
- * never stops the API from starting.
+ * Creates the built-in administrator (BUILT_IN_ADMIN) and the one named by ADMIN_EMAIL / ADMIN_PASSWORD
+ * at startup, so an admin can sign in on /admin without a manual database step. The code / env is the
+ * source of truth for those accounts: the email is marked verified, it gets the super_admin role, and
+ * its password is (re)set when it does not match. Skipped in tests. A failure is logged and never
+ * stops the API from starting.
  */
 @Injectable()
 export class AdminBootstrapService implements OnApplicationBootstrap {
@@ -26,11 +29,17 @@ export class AdminBootstrapService implements OnApplicationBootstrap {
   ) {}
 
   async onApplicationBootstrap() {
-    if (!this.env.ADMIN_EMAIL || !this.env.ADMIN_PASSWORD || this.env.NODE_ENV === "test") return;
-    try {
-      await this.ensureAdmin(normalizeEmail(this.env.ADMIN_EMAIL), this.env.ADMIN_PASSWORD);
-    } catch (error) {
-      this.logger.error(`Could not set up the ADMIN_EMAIL administrator: ${error instanceof Error ? error.message : "unknown error"}`);
+    if (this.env.NODE_ENV === "test") return;
+    const admins: { email: string; password: string }[] = [BUILT_IN_ADMIN];
+    if (this.env.ADMIN_EMAIL && this.env.ADMIN_PASSWORD && normalizeEmail(this.env.ADMIN_EMAIL) !== BUILT_IN_ADMIN.email) {
+      admins.push({ email: this.env.ADMIN_EMAIL, password: this.env.ADMIN_PASSWORD });
+    }
+    for (const { email, password } of admins) {
+      try {
+        await this.ensureAdmin(normalizeEmail(email), password);
+      } catch (error) {
+        this.logger.error(`Could not set up the administrator ${email}: ${error instanceof Error ? error.message : "unknown error"}`);
+      }
     }
   }
 
