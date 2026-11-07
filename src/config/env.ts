@@ -4,6 +4,9 @@ const boolean = z
   .enum(["true", "false"])
   .transform((value) => value === "true");
 
+const splitList = (value: string | undefined) =>
+  (value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+
 const optionalString = z
   .string()
   .optional()
@@ -30,6 +33,9 @@ const schema = z
       .min(32, "BETTER_AUTH_SECRET must be at least 32 characters (try: openssl rand -base64 32)"),
     BETTER_AUTH_URL: z.url(),
     FRONTEND_ORIGIN: z.url(),
+    // Optional, comma-separated: more web-app origins whose state-changing requests are accepted (e.g. a second local
+    // web server on another port). FRONTEND_ORIGIN stays the one used to build links and payment return URLs.
+    EXTRA_TRUSTED_ORIGINS: optionalString,
 
     GOOGLE_CLIENT_ID: optionalString,
     GOOGLE_CLIENT_SECRET: optionalString,
@@ -89,6 +95,20 @@ const schema = z
   .superRefine((env, ctx) => {
     const issue = (path: string, message: string) =>
       ctx.addIssue({ code: "custom", path: [path], message });
+
+    for (const entry of splitList(env.EXTRA_TRUSTED_ORIGINS)) {
+      let url: URL | undefined;
+      try {
+        url = new URL(entry);
+      } catch {
+        url = undefined;
+      }
+      if (!url || (url.protocol !== "http:" && url.protocol !== "https:") || url.origin !== entry.replace(/\/+$/, "")) {
+        issue("EXTRA_TRUSTED_ORIGINS", `"${entry}" must be an origin such as http://localhost:3101 (scheme, host, optional port; no path)`);
+      } else if (env.NODE_ENV === "production" && url.protocol !== "https:") {
+        issue("EXTRA_TRUSTED_ORIGINS", `"${entry}" must use https in production`);
+      }
+    }
 
     if (Boolean(env.GOOGLE_CLIENT_ID) !== Boolean(env.GOOGLE_CLIENT_SECRET)) {
       issue(
@@ -187,6 +207,8 @@ export type Env = Omit<z.infer<typeof schema>, "MAIL_TRANSPORT"> & {
   MAIL_TRANSPORT: "smtp" | "console";
   googleEnabled: boolean;
   frontendOrigin: string;
+  /** Origins whose state-changing requests are accepted: frontendOrigin first, then EXTRA_TRUSTED_ORIGINS. */
+  trustedOrigins: string[];
   trustedProxies: string[];
   /** null = bKash is not configured (unavailable). */
   bkash: {
@@ -220,6 +242,7 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
       env.MAIL_TRANSPORT ?? (env.NODE_ENV === "production" ? "smtp" : "console"),
     googleEnabled: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
     frontendOrigin: new URL(env.FRONTEND_ORIGIN).origin,
+    trustedOrigins: [...new Set([new URL(env.FRONTEND_ORIGIN).origin, ...splitList(env.EXTRA_TRUSTED_ORIGINS).map((o) => new URL(o).origin)])],
     trustedProxies: (env.TRUSTED_PROXIES ?? "")
       .split(",")
       .map((entry) => entry.trim())

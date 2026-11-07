@@ -14,7 +14,7 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
  * CSRF defence for cookie-authenticated, state-changing requests: the Origin
- * (or, failing that, Referer) must be the web app's origin. This complements
+ * (or, failing that, Referer) must be the web app's origin (FRONTEND_ORIGIN, or one of EXTRA_TRUSTED_ORIGINS). This complements
  * SameSite=Lax cookies. Better Auth applies its own equivalent check to /auth/*.
  */
 @Injectable()
@@ -39,7 +39,7 @@ export class OriginGuard implements CanActivate {
     } catch {
       origin = undefined;
     }
-    if (origin !== this.env.frontendOrigin) {
+    if (!origin || !this.env.trustedOrigins.includes(origin)) {
       throw new ForbiddenException("Cross-origin request rejected");
     }
     return true;

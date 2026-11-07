@@ -152,3 +152,26 @@ describe("operational settings", () => {
     expect(() => loadEnv({ ...base, HTTP_LOG: "yes" })).toThrow(/HTTP_LOG/);
   });
 });
+
+describe("trusted origins", () => {
+  it("is just FRONTEND_ORIGIN by default", () => {
+    expect(loadEnv(base).trustedOrigins).toEqual(["http://localhost:3000"]);
+  });
+
+  it("adds EXTRA_TRUSTED_ORIGINS after FRONTEND_ORIGIN, normalised and without duplicates", () => {
+    const env = loadEnv({ ...base, EXTRA_TRUSTED_ORIGINS: " http://localhost:3101 , http://localhost:3000,http://localhost:3102/" });
+    expect(env.trustedOrigins).toEqual(["http://localhost:3000", "http://localhost:3101", "http://localhost:3102"]);
+    expect(env.frontendOrigin).toBe("http://localhost:3000");
+  });
+
+  it("rejects entries that are not plain http(s) origins", () => {
+    for (const bad of ["localhost:3101", "ftp://example.com", "http://localhost:3101/admin", "http://localhost:3101?x=1", "*"]) {
+      expect(() => loadEnv({ ...base, EXTRA_TRUSTED_ORIGINS: bad }), bad).toThrow(/EXTRA_TRUSTED_ORIGINS/);
+    }
+  });
+
+  it("requires https in production", () => {
+    expect(() => loadEnv({ ...prod, EXTRA_TRUSTED_ORIGINS: "http://staging.example.com" })).toThrow(/https/);
+    expect(loadEnv({ ...prod, EXTRA_TRUSTED_ORIGINS: "https://staging.example.com" }).trustedOrigins).toEqual(["https://app.example.com", "https://staging.example.com"]);
+  });
+});

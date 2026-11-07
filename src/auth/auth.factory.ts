@@ -56,7 +56,7 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
 
     // Origin check for cookie-authenticated requests and redirect allow-list
     // for callbackURL / redirectTo / errorCallbackURL.
-    trustedOrigins: [env.frontendOrigin],
+    trustedOrigins: env.trustedOrigins,
 
     emailAndPassword: {
       enabled: true,
@@ -110,7 +110,7 @@ export function createAuth(env: Env, prisma: PrismaService, mail: MailService) {
     },
 
     plugins: [
-      demoLogin(prisma, env.frontendOrigin),
+      demoLogin(prisma, env.trustedOrigins),
       emailOTP({
         otpLength: OTP_LENGTH,
         expiresIn: OTP_TTL_SECONDS,

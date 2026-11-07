@@ -27,7 +27,7 @@ export const DEMO_SIGN_IN_PATH = "/demo/sign-in";
  *
  * The session is a browser-session cookie and expires after DEMO_SESSION_SECONDS; it is never extended.
  */
-export function demoLogin(prisma: PrismaService, frontendOrigin: string): BetterAuthPlugin {
+export function demoLogin(prisma: PrismaService, trustedOrigins: readonly string[]): BetterAuthPlugin {
   const db = prisma.unscoped;
 
   return {
@@ -51,7 +51,7 @@ export function demoLogin(prisma: PrismaService, frontendOrigin: string): Better
           } catch {
             origin = undefined;
           }
-          if (origin !== frontendOrigin) throw new APIError("FORBIDDEN", { message: "Cross-origin request rejected", code: "INVALID_ORIGIN" });
+          if (!origin || !trustedOrigins.includes(origin)) throw new APIError("FORBIDDEN", { message: "Cross-origin request rejected", code: "INVALID_ORIGIN" });
 
           const key = ctx.body.role;
           const profile = DEMO_PROFILES[key];

@@ -33,7 +33,15 @@
     "prebuild": "prisma generate",
     "postinstall": "prisma generate",
     "check": "npm run typecheck && npm run lint && npm test && npm run test:e2e",
-    "build:vercel": "nest build && node scripts/bundle-vercel.mjs"
+    "build:vercel": "nest build && node scripts/bundle-vercel.mjs",
+    "perf:seed": "DOTENV_CONFIG_PATH=.env.perf tsx scripts/seed-perf.ts",
+    "perf:clean": "DOTENV_CONFIG_PATH=.env.perf tsx scripts/clean-perf.ts",
+    "perf:db:up": "docker compose -f docker-compose.perf.yml up -d --wait",
+    "perf:db:down": "docker compose -f docker-compose.perf.yml stop",
+    "perf:db:migrate": "DOTENV_CONFIG_PATH=.env.perf prisma migrate deploy",
+    "perf:db:seed": "DOTENV_CONFIG_PATH=.env.perf tsx prisma/seed.ts && DOTENV_CONFIG_PATH=.env.perf tsx scripts/demo-seed.ts",
+    "perf:build": "tsc -p tsconfig.build.json --outDir dist-perf --tsBuildInfoFile dist-perf/.tsbuildinfo",
+    "perf:start": "DOTENV_CONFIG_PATH=.env.perf node --enable-source-maps dist-perf/main.js"
   },
   "dependencies": {
     "@better-auth/prisma-adapter": "^1.7.12",
@@ -54,6 +62,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@faker-js/faker": "^10.6.0",
     "@nestjs/cli": "^12.0.0",
     "@nestjs/schematics": "^12.0.0",
     "@nestjs/testing": "^12.0.1",

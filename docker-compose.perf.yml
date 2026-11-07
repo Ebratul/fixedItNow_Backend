@@ -1,0 +1,33 @@
+# Local PERFORMANCE-TESTING database (docs/PERFORMANCE.md). Separate from docker-compose.yml (the dev database) so
+# the two never share data, port or volume. Credentials are throwaway defaults for a database that only listens on
+# 127.0.0.1; never reuse them anywhere.
+#
+#   npm run perf:db:up      start (data survives restarts and reboots: it lives in the named volume below)
+#   npm run perf:db:down    stop, KEEPING the data
+#   docker compose -f docker-compose.perf.yml down -v   stop and DELETE the data
+#
+# Why not `npx prisma dev`: it runs PGlite, which serves one connection at a time. Measured on 2026-11-07: while one
+# transaction is open every other connection waits (> 5 s), and 10 parallel queries took 485 ms vs 48 ms on real
+# PostgreSQL. The API runs queries in parallel and uses transactions, so timings there would be meaningless.
+name: fixeditnow-perf
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: fixeditnow-perf-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fixeditnow
+      POSTGRES_PASSWORD: perfpassword
+      POSTGRES_DB: fixeditnow_perf
+    ports:
+      - "127.0.0.1:5455:5432"
+    volumes:
+      - fixeditnow_perf_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fixeditnow -d fixeditnow_perf"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  fixeditnow_perf_pg:
+    name: fixeditnow_perf_pg
