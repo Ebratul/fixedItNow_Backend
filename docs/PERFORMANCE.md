@@ -96,4 +96,5 @@ docker compose -f docker-compose.perf.yml down -v      # delete the database and
 - Mail is printed to the API terminal (`MAIL_TRANSPORT=console`). bKash, Google sign-in and the AI assistant are
   not configured, so those features answer "not available".
 - Each API request logs one JSON line with its duration (`HTTP_LOG=true`).
-- Record every optimization in `/document/perf-reports/CHANGELOG.md` at the monorepo root.
+- Record every optimization in `docs/performance/CHANGELOG.md` of the frontend repository (fixedItNow_frontend),
+  next to the reports (`docs/performance/before/`, `bottlenecks.md`).
