@@ -1,0 +1,63 @@
+# Continuous integration. It uses NO secrets and NO production credentials: every
+# value below is a throwaway for a disposable service container. It never deploys
+# and never touches a real database or provider. Failed checks fail the job.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint, types, unit, integration, migrations, build, audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-throwaway
+          POSTGRES_DB: fixeditnow_test      # the e2e runner refuses any database whose name does not end in _test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d fixeditnow_test" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://ci:ci-throwaway@localhost:5432/fixeditnow_test
+      DATABASE_URL: postgresql://ci:ci-throwaway@localhost:5432/fixeditnow_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      # The cross-service contract tests (test/ai-contract.e2e-spec.ts, test/admin-ai-contract.e2e-spec.ts)
+      # need the Python service checked out next to this repo as ../rag_agent; they skip themselves without it.
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # applies every migration to the empty database, seeds categories, then runs the integration suite
+      - run: npm run test:e2e
+      - name: Migration drift (schema.prisma must equal the migrations)
+        run: npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+      - run: npm audit --audit-level=high
+
+  images:
+    name: Container images build (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [backend]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target runtime -t fixeditnow-api .
+      - run: docker build --target migrate -t fixeditnow-migrate .

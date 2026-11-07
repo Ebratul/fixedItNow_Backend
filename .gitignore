@@ -12,3 +12,10 @@ staging.env
 .env.local
 /bundle
 .env*
+
+# editors / OS / logs
+.DS_Store
+*.log
+.idea/
+.vscode/
+!.env.example

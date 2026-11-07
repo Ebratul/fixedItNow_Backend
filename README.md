@@ -1,8 +1,8 @@
 # backend
 
 NestJS 12 (ESM) API with Prisma 7 + PostgreSQL and Better Auth. Only backend code belongs in this
-folder. See [../docs/API.md](../docs/API.md), [../docs/SECURITY.md](../docs/SECURITY.md) and
-[../docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md).
+folder. See [docs/API.md](docs/API.md), [docs/SECURITY.md](docs/SECURITY.md) and
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ```bash
 cp .env.example .env && npm install
