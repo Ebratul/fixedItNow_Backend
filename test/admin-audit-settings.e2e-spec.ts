@@ -120,6 +120,10 @@ describe("audit trail and platform settings", () => {
       expect(all.body.total).toBe(3);
       expect(all.body.entries.map((e: { targetId: string }) => e.targetId)).toEqual(["x3", "x2"]);
       expect(all.body.totalPages).toBe(2);
+      // "All (2000+)" in the page-size menu: the one large page size that is accepted.
+      const everything = await a.agent.get(`${t.api}/admin/audit?action=test.*&pageSize=5000`);
+      expect(everything.status).toBe(200);
+      expect(everything.body).toMatchObject({ pageSize: 5000, total: 3, totalPages: 1 });
       expect((await a.agent.get(`${t.api}/admin/audit?actorId=${b.userId}&action=test.*`)).body.total).toBe(1);
       expect((await a.agent.get(`${t.api}/admin/audit?targetId=x3`)).body.entries[0].actor).toMatchObject({ id: a.userId });
       expect((await a.agent.get(`${t.api}/admin/audit?from=2999-01-01`)).body.total).toBe(0);
@@ -129,7 +133,7 @@ describe("audit trail and platform settings", () => {
 
     it("validates filters", async () => {
       const a = await t.newAdmin();
-      for (const q of ["pageSize=1000", "page=0", "from=yesterday", "action=DROP TABLE", "targetType=a;b"]) {
+      for (const q of ["pageSize=1000", "pageSize=101", "pageSize=5001", "page=0", "from=yesterday", "action=DROP TABLE", "targetType=a;b"]) {
         expect((await a.agent.get(`${t.api}/admin/audit?${q}`)).status, q).toBe(400);
       }
     });

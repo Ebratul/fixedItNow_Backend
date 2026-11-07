@@ -16,10 +16,22 @@ const filters = {
   to: z.coerce.date().optional(),
   q: optionalText(80),
 };
+/**
+ * The "All (2000+)" choice of the /admin/audit page-size menu: one page large enough for the performance data set
+ * (about 2,000 entries, docs/PERFORMANCE.md), and the same bound as the CSV export. Still a hard upper bound
+ * (SRS 5.3-a); any other page size stays within 1-100.
+ */
+export const AUDIT_ALL_PAGE_SIZE = 5000;
+
 const listQuery = z.object({
   ...filters,
   page: z.coerce.number().int().min(1).max(10_000).default(1),
-  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+  pageSize: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .refine((n) => n <= 100 || n === AUDIT_ALL_PAGE_SIZE, `pageSize must be 1-100 or ${AUDIT_ALL_PAGE_SIZE}`)
+    .default(25),
 });
 const exportQuery = z.object(filters);
 
