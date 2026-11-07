@@ -28,13 +28,18 @@ describe("admin user management", () => {
       expect(byEmail.body.total).toBe(1);
       expect((await admin.agent.get(`${t.api}/admin/users?role=ADMIN`)).body.total).toBe(1);
       expect((await admin.agent.get(`${t.api}/admin/users?kind=worker`)).body.total).toBe(1);
+      // "All (1000+)" in the page-size menu: the one large page size that is accepted.
+      const everyone = await admin.agent.get(`${t.api}/admin/users?pageSize=2000`);
+      expect(everyone.status).toBe(200);
+      expect(everyone.body).toMatchObject({ page: 1, pageSize: 2000, total: 7, totalPages: 1 });
+      expect(everyone.body.users).toHaveLength(7);
       const json = JSON.stringify(all.body) + JSON.stringify(byName.body);
       expect(json).not.toMatch(/password|scrypt|token|\$argon/i);
     });
 
     it("validates the query string", async () => {
       const admin = await t.newAdmin();
-      for (const q of ["pageSize=500", "page=0", "role=OWNER", "status=banned", "q="]) {
+      for (const q of ["pageSize=500", "pageSize=51", "pageSize=2001", "page=0", "role=OWNER", "status=banned", "q="]) {
         expect((await admin.agent.get(`${t.api}/admin/users?${q}`)).status, q).toBe(400);
       }
       expect((await admin.agent.get(`${t.api}/admin/users/not*valid`)).status).toBe(400);

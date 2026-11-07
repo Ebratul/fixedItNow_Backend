@@ -8,13 +8,25 @@ import { AuthIdPipe } from "../../common/id.pipe.js";
 import { ZodPipe } from "../../common/zod.pipe.js";
 import { UsersService } from "./users.service.js";
 
+/**
+ * The "All (1000+)" choice of the /admin/users page-size menu: one page large enough for the whole performance data set
+ * (about 1,500 users, docs/PERFORMANCE.md). Still a hard upper bound, so the query is never unbounded (SRS 5.3-a); any
+ * other page size stays within 1-50.
+ */
+export const USERS_ALL_PAGE_SIZE = 2000;
+
 const listQuery = z.object({
   q: z.string().trim().min(1).max(100).optional(),
   role: z.enum(["USER", "ADMIN"]).optional(),
   status: z.enum(["active", "suspended"]).optional(),
   kind: z.enum(["customer", "worker"]).optional(),
   page: z.coerce.number().int().min(1).max(10_000).default(1),
-  pageSize: z.coerce.number().int().min(1).max(50).default(20),
+  pageSize: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .refine((n) => n <= 50 || n === USERS_ALL_PAGE_SIZE, `pageSize must be 1-50 or ${USERS_ALL_PAGE_SIZE}`)
+    .default(20),
 });
 const suspensionBody = z.strictObject({ suspended: z.boolean(), reason: userText(3, 500, "Reason"), confirm: z.literal(true, "Confirmation is required") });
 const adminAccessBody = z.strictObject({ roleId: z.uuid().nullable(), reason: userText(3, 500, "Reason"), confirm: z.literal(true, "Confirmation is required") });
